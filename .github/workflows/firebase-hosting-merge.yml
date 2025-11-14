@@ -1,0 +1,23 @@
+name: Deploy to Firebase Hosting on merge
+on:
+  push:
+    branches:
+      - main
+jobs:
+  build_and_deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # ↓↓↓ Add this step to install dependencies and build inside the dineflowreact folder
+      - name: Install and Build React App
+        run: |
+          cd dineflowreact
+          npm install
+          npm run build
+      # ↓↓↓ Deploy to Firebase Hosting - note the public directory must match your firebase.json!
+      - uses: FirebaseExtended/action-hosting-deploy@v0
+        with:
+          repoToken: ${{ secrets.GITHUB_TOKEN }}
+          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_STUDIO_6175876982_79C7F }}
+          channelId: live
+          projectId: studio-6175876982-79c7f
