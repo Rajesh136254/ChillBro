@@ -2,28 +2,29 @@ import React, { useContext } from 'react';
 import { Navigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 
-const ProtectedRoute = ({ children, adminOnly = false }) => {
-    const { isAuthenticated, isAdmin, isLoading } = useAuth();
+const ProtectedRoute = ({ children, requiredRole = null }) => {
+  const { currentUser, isLoading } = useAuth();
 
-    if (isLoading) {
-        return (
-            <div className="min-h-screen flex items-center justify-center">
-                <div className="spinner-border animate-spin inline-block w-8 h-8 border-4 rounded-full border-blue-600 border-t-transparent" role="status">
-                    <span className="visually-hidden">Loading...</span>
-                </div>
-            </div>
-        );
+  if (isLoading) {
+    return <div className="min-h-screen flex items-center justify-center"><div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div></div>;
+  }
+
+  if (!currentUser) {
+    return <Navigate to="/login?mode=login" replace />;
+  }
+
+  // If a specific role is required, check if user has that role
+  // 'customer' and 'admin' are treated as privileged roles
+  if (requiredRole && currentUser.role !== requiredRole && currentUser.role !== 'customer' && currentUser.role !== 'admin') {
+    // Redirect based on user role
+    if (currentUser.role === 'user') {
+      return <Navigate to="/customer.html" replace />;
+    } else {
+      return <Navigate to="/dashboard" replace />;
     }
+  }
 
-    if (!isAuthenticated) {
-        return <Navigate to="/login" replace />;
-    }
-
-    if (adminOnly && !isAdmin) {
-        return <Navigate to="/customer" replace />;
-    }
-
-    return children;
+  return children;
 };
 
 export default ProtectedRoute;
