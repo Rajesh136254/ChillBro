@@ -17,8 +17,34 @@ const {
   getPasswordResetSuccessTemplate,
   getWelcomeEmailText,
   getForgotPasswordText,
-  getPasswordResetSuccessText
+  getPasswordResetSuccessText,
+  getSupportTicketTemplate,
+  getSupportReplyTemplate
 } = require('./emailTemplates');
+
+// Email transporter configuration - Moved to top for global access
+const transporter = nodemailer.createTransport({
+  service: 'gmail', // Or use 'smtp.ethereal.email' for testing
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS
+  }
+});
+
+// Verify transporter
+transporter.verify(function (error, success) {
+  if (error) {
+    console.log('[EMAIL ERROR] Transporter verification failed:', error);
+    console.log('[EMAIL ERROR] Check these settings:');
+    console.log('[EMAIL ERROR] - EMAIL_USER:', process.env.EMAIL_USER ? 'Set' : 'NOT SET');
+    console.log('[EMAIL ERROR] - EMAIL_PASS:', process.env.EMAIL_PASS ? 'Set (length: ' + process.env.EMAIL_PASS.length + ')' : 'NOT SET');
+    console.log('[EMAIL ERROR] - If using Gmail, ensure you are using an App Password, not your regular password');
+    console.log('[EMAIL ERROR] - Generate at: https://myaccount.google.com/apppasswords');
+  } else {
+    console.log('[EMAIL SUCCESS] Server is ready to send emails');
+    console.log('[EMAIL SUCCESS] Using email:', process.env.EMAIL_USER);
+  }
+});
 
 const app = express();
 const httpServer = createServer(app);
@@ -33,8 +59,18 @@ const allowedOrigins = [
   'http://127.0.0.1:3002',
   'https://dineflowfrontend.vercel.app',
   'https://dineflowbackend.onrender.com',
-  'https://dineflowfrontend-6wmy.vercel.app'
+  'https://dineflowfrontend-6wmy.vercel.app',
+  'https://endofhunger.work.gd',
+  'http://endofhunger.work.gd',
+  'https://redsorm.in',
+  'https://www.redsorm.in',
+  'http://redsorm.in',
+  'http://www.redsorm.in'
 ];
+
+// Serve static files - moved to top level
+app.use('/uploads', express.static(path.join(__dirname, 'public/uploads')));
+app.use(express.static(path.join(__dirname, 'public'))); // General public folder
 
 // Socket.IO CORS configuration
 // Socket.IO CORS configuration
@@ -49,6 +85,13 @@ const io = new Server(httpServer, {
 
       const vercelRegex = /^https:\/\/dineflowfrontend.*\.vercel\.app$/;
       if (vercelRegex.test(origin)) return callback(null, true);
+
+      const customDomainRegex = /^https?:\/\/(?:[a-zA-Z0-9-]+\.)?endofhunger\.work\.gd$/;
+      if (customDomainRegex.test(origin)) return callback(null, true);
+
+      // Allow redsorm.in domain and its subdomains
+      const redsormRegex = /^https?:\/\/(?:[a-zA-Z0-9-]+\.)?redsorm\.in$/;
+      if (redsormRegex.test(origin)) return callback(null, true);
 
       callback(new Error('Not allowed by CORS'));
     },
@@ -69,8 +112,9 @@ app.use(cors({
       return callback(null, true);
     }
 
-    // Allow localhost subdomains (e.g. http://tenant.localhost:3000)
-    const localhostRegex = /^http:\/\/[a-zA-Z0-9-]+\.localhost(?::\d+)?$/;
+    // Allow localhost subdomains (e.g. http://tenant.localhost:3000 OR http://ma1.ma1.localhost:3000)
+    // Updated regex to accept any level of subdomain nesting
+    const localhostRegex = /^http:\/\/([a-zA-Z0-9-]+\.)*localhost(:\d+)?$/;
     if (localhostRegex.test(origin)) {
       return callback(null, true);
     }
@@ -81,19 +125,128 @@ app.use(cors({
       return callback(null, true);
     }
 
+    // Allow custom domain and its subdomains
+    const customDomainRegex = /^https?:\/\/(?:[a-zA-Z0-9-]+\.)?endofhunger\.work\.gd$/;
+    if (customDomainRegex.test(origin)) {
+      return callback(null, true);
+    }
+
+    // Allow redsorm.in domain and its subdomains (main production domain)
+    const redsormRegex = /^https?:\/\/(?:[a-zA-Z0-9-]+\.)?redsorm\.in$/;
+    if (redsormRegex.test(origin)) {
+      return callback(null, true);
+    }
+
     console.log('CORS blocked origin:', origin);
     callback(new Error('Not allowed by CORS'));
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'x-company-slug', 'x-company-id', 'ngrok-skip-browser-warning'],
   preflightContinue: false,
   optionsSuccessStatus: 204
 }));
 
+// Serve uploaded files statically
+app.use('/uploads', express.static(path.join(__dirname, 'public/uploads')));
+
 // Add JSON parsing middleware
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// MySQL connection pool with proper configuration
+const pool = mysql.createPool({
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,
+  port: process.env.DB_PORT || 3306,
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0,
+  // Fixed SSL configuration for Aiven
+  ssl: {
+    rejectUnauthorized: false  // Allow self-signed certificates
+  }
+});
+
+// Middleware to resolve company from request (for public routes)
+const resolveCompany = async (req, res, next) => {
+  try {
+    // 0) Priority: ID header (from Vercel testing mode or explicit selection)
+    let companyIdHeader = req.headers['x-company-id'];
+    if (companyIdHeader) {
+      const [rows] = await pool.execute('SELECT * FROM companies WHERE id = ?', [companyIdHeader]);
+      if (rows.length > 0) {
+        req.company = rows[0];
+        // console.log(`[Context] resolved company by ID: ${req.company.name} (${req.company.id})`);
+        return next();
+      }
+    }
+
+    // 1) Highest priority: explicit slug header
+    let slug = req.headers['x-company-slug'];
+    let isExplicitSlug = !!slug;
+
+    // 2) Otherwise, derive from the Origin header (frontend domain with subdomain)
+    if (!slug) {
+      const origin = req.get('origin') || req.headers.origin;
+      if (origin) {
+        try {
+          const originHost = new URL(origin).hostname; // e.g. company.myapp.vercel.app
+          const parts = originHost.split('.');
+
+          // We expect subdomain-based tenancy only when there is a subdomain present
+          // (e.g. company.domain.com or company.localhost)
+          if (parts.length > 2 || (parts.length === 2 && parts[1] === 'localhost')) {
+            const candidate = parts[0];
+            if (candidate && candidate !== 'www' && candidate !== 'api') {
+              slug = candidate;
+            }
+          }
+        } catch (e) {
+          console.warn('Failed to parse Origin header for company slug:', origin, e.message);
+        }
+      }
+    }
+
+    // 3) If we still don't have a slug, DON'T apply fallback automatically
+    // This endpoint is often called without authentication context
+    // Authenticated users should use /api/company/profile which uses their token's company_id
+    // Public/unauthenticated users on customer page can use the fallback
+    if (!slug) {
+      // Only apply fallback for customer-page-like routes or if explicitly needed
+      // For now, let's NOT set a fallback company to avoid all admins seeing the same one
+      return next();
+    }
+
+
+    // 4) Look up company in DB
+    const [rows] = await pool.execute('SELECT * FROM companies WHERE slug = ?', [slug]);
+    if (rows.length === 0) {
+      // If explicit slug provided but not found -> 404
+      if (isExplicitSlug) {
+        return res.status(404).json({ success: false, message: 'Company not found' });
+      }
+      // If implicit (subdomain) and not found -> just continue without context (maybe fallback to main landing page logic later)
+      // console.warn(`Company slug '${slug}' derived from subdomain not found in DB.`);
+      return next();
+    }
+
+    // Attach company info to request
+    req.company = rows[0];
+    // console.log(`[Context] resolved company: ${req.company.name} (${req.company.id})`);
+    next();
+
+  } catch (error) {
+    console.error('Error in resolveCompany middleware:', error);
+    // Don't crash, just proceed without company context
+    next();
+  }
+};
+
+// Middleware to resolve company from request (for public routes) - placed here to be available for all routes
+app.use(resolveCompany);
 
 // Add request logging middleware
 app.use((req, res, next) => {
@@ -110,14 +263,8 @@ app.use((req, res, next) => {
 });
 
 // Add error handling middleware
-app.use((err, req, res, next) => {
-  console.error('Express error:', err);
-  res.status(500).json({
-    success: false,
-    message: 'Internal server error',
-    error: err.message
-  });
-});
+// Error handling middleware moved to the end
+
 
 // Socket.IO connection handling with Authentication
 io.use((socket, next) => {
@@ -146,20 +293,7 @@ io.on('connection', (socket) => {
 });
 
 // MySQL connection pool with proper configuration
-const pool = mysql.createPool({
-  host: process.env.DB_HOST,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME,
-  port: process.env.DB_PORT || 3306,
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0,
-  // Fixed SSL configuration for Aiven
-  ssl: {
-    rejectUnauthorized: false  // Allow self-signed certificates
-  }
-});
+
 
 // JWT Secret Key
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
@@ -167,7 +301,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
 // Authentication middleware
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
-  console.log('Auth Header:', authHeader ? 'Present' : 'Missing', authHeader);
+  // console.log('Auth Header:', authHeader ? 'Present' : 'Missing', authHeader); // Commented out to reduce noise, enable if needed
   const token = authHeader && authHeader.split(' ')[1];
 
   if (!token) {
@@ -186,49 +320,7 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
-// Middleware to resolve company from request (for public routes)
-const resolveCompany = async (req, res, next) => {
-  try {
-    // Try to get slug from header
-    let slug = req.headers['x-company-slug'];
 
-    // If not in header, try to extract from Origin/Host (subdomain)
-    if (!slug) {
-      const host = req.headers.host;
-      if (host && host.includes('.')) {
-        // Assuming format: slug.domain.com or slug.localhost
-        const parts = host.split('.');
-        if (parts.length > 1) { // At least slug.localhost
-          // Avoid 'www' or 'api' as slugs if possible, or handle them
-          if (parts[0] !== 'www' && parts[0] !== 'api') {
-            slug = parts[0];
-          }
-        }
-      }
-    }
-
-    if (!slug) {
-      // Fallback for development/testing if no slug found
-      console.log('No company slug found, proceeding without company context (legacy mode)');
-      return next();
-    }
-
-    const [companies] = await pool.execute(
-      'SELECT id, name, slug FROM companies WHERE slug = ?',
-      [slug]
-    );
-
-    if (companies.length === 0) {
-      return res.status(404).json({ success: false, message: 'Company not found' });
-    }
-
-    req.company = companies[0];
-    next();
-  } catch (error) {
-    console.error('Error resolving company:', error);
-    res.status(500).json({ success: false, message: 'Internal server error' });
-  }
-};
 
 // Test database connection
 const testDatabaseConnection = async () => {
@@ -277,14 +369,153 @@ const updateDatabaseSchema = async () => {
 
     // Multitenancy columns
     await addColumnIfNotExists('restaurant_tables', 'company_id', 'INT');
+    await addColumnIfNotExists('restaurant_tables', 'group_id', 'INT'); // Fix for table creation 500 error
+
+    // Ensure table_groups exists before adding columns
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS table_groups (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
     await addColumnIfNotExists('table_groups', 'company_id', 'INT');
     await addColumnIfNotExists('orders', 'company_id', 'INT');
-    await addColumnIfNotExists('ingredients', 'company_id', 'INT');
+    await addColumnIfNotExists('order_items', 'company_id', 'INT');
+    await addColumnIfNotExists('ingredients', 'branch_id', 'INT'); // Branch Management
     await addColumnIfNotExists('menu_items', 'company_id', 'INT');
     await addColumnIfNotExists('order_items', 'company_id', 'INT');
     await addColumnIfNotExists('staff', 'company_id', 'INT');
     await addColumnIfNotExists('recipe_items', 'company_id', 'INT');
     await addColumnIfNotExists('waste_log', 'company_id', 'INT');
+    await addColumnIfNotExists('users', 'company_id', 'INT');
+
+    // Companies multitenancy metadata
+    await addColumnIfNotExists('companies', 'slug', 'VARCHAR(255)');
+    await addColumnIfNotExists('companies', 'domain', 'VARCHAR(255)');
+
+    // Support System Tables
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS support_tickets (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        user_id INT,
+        company_id INT,
+        name VARCHAR(255),
+        email VARCHAR(255),
+        subject VARCHAR(255),
+        status VARCHAR(50) DEFAULT 'open',
+        message_id VARCHAR(255),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (company_id) REFERENCES companies(id)
+      )
+    `);
+
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS support_messages (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        ticket_id INT,
+        sender_role VARCHAR(50),
+        message TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (ticket_id) REFERENCES support_tickets(id)
+      )
+    `);
+
+    // Add company profile columns
+    await addColumnIfNotExists('companies', 'logo_url', 'TEXT');
+    await addColumnIfNotExists('companies', 'banner_url', 'TEXT');
+
+    // Create roles table
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS roles (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(50) NOT NULL,
+        permissions JSON,
+        company_id INT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (company_id) REFERENCES companies(id)
+      )
+    `);
+
+    // Update users table
+    await addColumnIfNotExists('users', 'phone', 'VARCHAR(20)');
+    await addColumnIfNotExists('users', 'role_id', 'INT');
+
+    // Update staff table
+    await addColumnIfNotExists('staff', 'pin', 'VARCHAR(10)');
+    await addColumnIfNotExists('staff', 'email', 'VARCHAR(100)');
+    await addColumnIfNotExists('staff', 'phone', 'VARCHAR(20)');
+
+    // Update tables for branch isolation
+    await addColumnIfNotExists('restaurant_tables', 'branch_id', 'INT');
+
+    // Update menu_items for branch isolation
+    await addColumnIfNotExists('menu_items', 'branch_id', 'INT');
+
+    // Update orders for branch isolation
+    await addColumnIfNotExists('orders', 'branch_id', 'INT');
+
+    // FIX: Update restaurant_tables constraints for branch-wise uniqueness
+    try {
+      // Drop ALL old constraints that don't include branch_id
+      const [allIndexes] = await connection.execute("SHOW INDEX FROM restaurant_tables");
+
+      for (const idx of allIndexes) {
+        const keyName = idx.Key_name;
+        // Skip PRIMARY key
+        if (keyName === 'PRIMARY') continue;
+
+        // Check if this is a unique constraint on table_number
+        if (keyName.includes('table') || keyName.includes('idx_tables_number_company') || keyName === 'uq_table_company') {
+          try {
+            console.log(`Dropping old constraint: ${keyName}`);
+            await connection.execute(`ALTER TABLE restaurant_tables DROP INDEX \`${keyName}\``);
+          } catch (dropErr) {
+            console.log(`Could not drop ${keyName}:`, dropErr.message);
+          }
+        }
+      }
+
+      // Create new branch-aware unique constraint
+      console.log('Adding branch-aware unique constraint (table_number, company_id, branch_id)...');
+      await connection.execute(`
+        ALTER TABLE restaurant_tables 
+        ADD UNIQUE KEY idx_table_company_branch (table_number, company_id, branch_id)
+      `);
+
+    } catch (err) {
+      console.error('Error updating table constraints:', err);
+      // Continue - don't block server start, but log clearly
+    }
+
+    // FIX: Update table_groups constraints for multitenancy
+    try {
+      // 1. Check for legacy 'name' index
+      const [nameIndexes] = await connection.execute("SHOW INDEX FROM table_groups WHERE Key_name = 'name'");
+      // If index exists and is not composite (no company_id), drop it
+      if (nameIndexes.length > 0 && !nameIndexes.some(idx => idx.Column_name === 'company_id')) {
+        console.log('Dropping legacy global unique constraint on table_groups.name...');
+        await connection.execute('ALTER TABLE table_groups DROP INDEX name');
+      }
+
+      // 2. Check for other common index names for this constraint
+      const [uniqIndexes] = await connection.execute("SHOW INDEX FROM table_groups WHERE Key_name = 'name_unique'");
+      if (uniqIndexes.length > 0 && !uniqIndexes.some(idx => idx.Column_name === 'company_id')) {
+        await connection.execute('ALTER TABLE table_groups DROP INDEX name_unique');
+      }
+
+      // 3. Add composite unique constraint
+      await connection.execute(`
+            ALTER TABLE table_groups
+            ADD UNIQUE KEY IF NOT EXISTS company_group_name_unique (company_id, name)
+        `);
+    } catch (err) {
+      // Ignore "Duplicate key" error if we are adding what already exists, but log others
+      if (err.code !== 'ER_DUP_KEYNAME') {
+        console.log('Note: table_groups constraint update:', err.message);
+      }
+    }
 
     connection.release();
     console.log('Schema check completed');
@@ -364,32 +595,37 @@ app.post('/api/ai/nutrition', async (req, res) => {
 });
 
 // Menu endpoints with enhanced error handling
-app.get('/api/menu', resolveCompany, async (req, res) => {
+app.get('/api/menu', authenticateToken, async (req, res) => {
   try {
     console.log('Fetching menu items...');
     let companyId = req.company ? req.company.id : null;
 
-    // Check for admin token if no company resolved from slug
+    // Check for admin/staff token if no company resolved from slug
+    if (!companyId && req.user && req.user.company_id) {
+      companyId = req.user.company_id;
+    }
+
+    // Default Fallback: If still no companyId (e.g. new customer on main domain),
+    // fetch the default "demo" company (same logic as resolveCompany fallback)
     if (!companyId) {
-      const authHeader = req.headers['authorization'];
-      const token = authHeader && authHeader.split(' ')[1];
-      if (token) {
-        try {
-          const decoded = jwt.verify(token, JWT_SECRET);
-          companyId = decoded.company_id;
-        } catch (e) { }
+      // Try to find the most "featured" company (has banner & logo)
+      const [companies] = await pool.execute('SELECT id FROM companies WHERE logo_url IS NOT NULL AND banner_url IS NOT NULL ORDER BY id DESC LIMIT 1');
+      if (companies.length > 0) {
+        companyId = companies[0].id;
+        console.log(`Using default fallback company: ${companyId}`);
       }
     }
 
-    let query = 'SELECT * FROM menu_items';
-    let params = [];
+    const { branch_id } = req.query;
 
-    if (companyId) {
-      query += ' WHERE company_id = ?';
-      params.push(companyId);
-    } else {
-      console.log('No company context for menu fetch, returning empty list');
-      return res.json({ success: true, data: [] });
+    // Dynamic Query Builder
+    let query = 'SELECT * FROM menu_items WHERE company_id = ?';
+    let params = [companyId];
+
+    // Branch Filtering - STRICT: Show only items from selected branch
+    if (branch_id && branch_id !== 'null' && branch_id !== 'undefined') {
+      query += ' AND branch_id = ?';
+      params.push(branch_id);
     }
 
     query += ' ORDER BY category, name';
@@ -431,9 +667,9 @@ app.get('/api/menu/:id', async (req, res) => {
 
 app.post('/api/menu', authenticateToken, async (req, res) => {
   try {
-    const { name, description, price_inr, price_usd, category, image_url, is_available, nutritional_info, vitamins } = req.body;
+    const { name, description, price_inr, price_usd, category, image_url, is_available, nutritional_info, vitamins, branch_id } = req.body;
     const { company_id } = req.user;
-    console.log(`Creating menu item for company_id: ${company_id}`);
+    console.log(`Creating menu item for company_id: ${company_id} branch_id: ${branch_id}`);
 
     if (!company_id) {
       return res.status(400).json({ success: false, message: 'Company context missing. Please relogin.' });
@@ -445,8 +681,8 @@ app.post('/api/menu', authenticateToken, async (req, res) => {
     }
 
     const [result] = await pool.execute(
-      'INSERT INTO menu_items (name, description, price_inr, price_usd, category, image_url, is_available, nutritional_info, vitamins, company_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [name, description, price_inr, price_usd, category.trim(), image_url || null, is_available !== false, nutritional_info || null, vitamins || null, company_id]
+      'INSERT INTO menu_items (name, description, price_inr, price_usd, category, image_url, is_available, nutritional_info, vitamins, company_id, branch_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [name, description, price_inr, price_usd, category.trim(), image_url || null, is_available !== false, nutritional_info || null, vitamins || null, company_id, branch_id || null]
     );
 
     const [newItem] = await pool.execute('SELECT * FROM menu_items WHERE id = ?', [result.insertId]);
@@ -463,7 +699,7 @@ app.post('/api/menu', authenticateToken, async (req, res) => {
 
 app.put('/api/menu/:id', authenticateToken, async (req, res) => {
   try {
-    const { name, description, price_inr, price_usd, category, image_url, is_available, nutritional_info, vitamins } = req.body;
+    const { name, description, price_inr, price_usd, category, image_url, is_available, nutritional_info, vitamins, branch_id } = req.body;
     const { company_id } = req.user;
 
     // Verify ownership
@@ -478,8 +714,8 @@ app.put('/api/menu/:id', authenticateToken, async (req, res) => {
     }
 
     const [result] = await pool.execute(
-      'UPDATE menu_items SET name = ?, description = ?, price_inr = ?, price_usd = ?, category = ?, image_url = ?, is_available = ?, nutritional_info = ?, vitamins = ? WHERE id = ? AND company_id = ?',
-      [name, description, price_inr, price_usd, category.trim(), image_url, is_available, nutritional_info || null, vitamins || null, req.params.id, company_id]
+      'UPDATE menu_items SET name = ?, description = ?, price_inr = ?, price_usd = ?, category = ?, image_url = ?, is_available = ?, nutritional_info = ?, vitamins = ?, branch_id = ? WHERE id = ? AND company_id = ?',
+      [name, description, price_inr, price_usd, category.trim(), image_url, is_available, nutritional_info || null, vitamins || null, branch_id || null, req.params.id, company_id]
     );
 
     const [updatedItem] = await pool.execute('SELECT * FROM menu_items WHERE id = ?', [req.params.id]);
@@ -552,25 +788,45 @@ app.get('/api/tables', authenticateToken, async (req, res) => {
       }
     }
 
+    // 2. Check req.company (from resolveCompany)
+    if (!company_id && req.company) {
+      company_id = req.company.id;
+    }
+
+    // Default Fallback: If still no companyId (e.g. new customer on main domain),
+    // fetch the default "demo" company (same logic as resolveCompany/menu fallback)
+    if (!company_id) {
+      const [companies] = await pool.execute('SELECT id FROM companies WHERE logo_url IS NOT NULL AND banner_url IS NOT NULL ORDER BY id DESC LIMIT 1');
+      if (companies.length > 0) {
+        company_id = companies[0].id;
+        console.log(`Using default fallback company for tables: ${company_id}`);
+      }
+    }
+
     if (!company_id) {
       return res.status(400).json({ success: false, message: 'Company context required' });
     }
 
     console.log('Fetching tables for company:', company_id);
+    const { branch_id } = req.query;
+
     try {
-      const [rows] = await pool.execute(
-        'SELECT rt.*, COALESCE(tg.name, "Non AC") as group_name FROM restaurant_tables rt LEFT JOIN table_groups tg ON rt.group_id = tg.id WHERE rt.company_id = ? AND rt.is_active = true ORDER BY rt.table_number',
-        [company_id]
-      );
-      console.log(`Found ${rows.length} tables for company ${company_id}`);
+      let query = 'SELECT rt.*, COALESCE(tg.name, "Non AC") as group_name FROM restaurant_tables rt LEFT JOIN table_groups tg ON rt.group_id = tg.id WHERE rt.company_id = ?';
+      let params = [company_id];
+
+      if (branch_id && branch_id !== 'null' && branch_id !== 'undefined') {
+        query += ' AND rt.branch_id = ?';
+        params.push(branch_id);
+      }
+
+      query += ' ORDER BY rt.table_number';
+
+      const [rows] = await pool.execute(query, params);
+      console.log(`Found ${rows.length} tables for company ${company_id} ${branch_id ? `branch ${branch_id}` : ''}`);
       res.json({ success: true, data: rows });
     } catch (innerError) {
-      // Fallback
-      const [rows] = await pool.execute(
-        "SELECT *, 'Non AC' as group_name FROM restaurant_tables WHERE company_id = ? ORDER BY table_number",
-        [company_id]
-      );
-      res.json({ success: true, data: rows });
+      console.error('Error fetching tables:', innerError);
+      res.status(500).json({ success: false, message: innerError.message });
     }
   } catch (error) {
     console.error('Error fetching tables:', error);
@@ -588,7 +844,7 @@ app.post('/api/tables', authenticateToken, async (req, res) => {
   try {
     await connection.beginTransaction();
 
-    const { table_number, table_name, group_id } = req.body;
+    const { table_number, table_name, group_id, branch_id } = req.body;
     const { company_id } = req.user;
 
     // 1. Validate required fields
@@ -600,69 +856,110 @@ app.post('/api/tables', authenticateToken, async (req, res) => {
       });
     }
 
-    // 2. Check if table number already exists for this company
-    const [existingTable] = await connection.execute(
-      'SELECT id FROM restaurant_tables WHERE table_number = ? AND company_id = ?',
-      [table_number, company_id]
-    );
+    // 2. Check if table number already exists for this company AND branch
+    let checkQuery = 'SELECT id FROM restaurant_tables WHERE table_number = ? AND company_id = ?';
+    const checkParams = [table_number, company_id];
+
+    if (branch_id) {
+      checkQuery += ' AND branch_id = ?';
+      checkParams.push(branch_id);
+    } else {
+      checkQuery += ' AND branch_id IS NULL';
+    }
+
+    const [existingTable] = await connection.execute(checkQuery, checkParams);
 
     if (existingTable.length > 0) {
       await connection.rollback();
       return res.status(400).json({
         success: false,
-        message: `Table number ${table_number} already exists. Please choose a different number.`
+        message: `Table number ${table_number} already exists in this branch. Please choose a different number.`
       });
     }
 
     // 3. Proceed with insertion
     const qr_code_data = `table-${table_number}`;
+    console.log('[DEBUG] Preparing insertion query...');
 
-    // Check if group_id column exists
-    const [columnCheck] = await connection.execute(`
-      SELECT COLUMN_NAME 
-      FROM INFORMATION_SCHEMA.COLUMNS 
-      WHERE TABLE_NAME = 'restaurant_tables' 
-      AND COLUMN_NAME = 'group_id'
-      AND TABLE_SCHEMA = DATABASE()
-    `);
-
-    let query, values;
-
-    if (columnCheck.length > 0) {
-      query = 'INSERT INTO restaurant_tables (table_number, table_name, qr_code_data, group_id, company_id) VALUES (?, ?, ?, ?, ?)';
-      values = [table_number, table_name || `Table ${table_number}`, qr_code_data, group_id || null, company_id];
-    } else {
-      query = 'INSERT INTO restaurant_tables (table_number, table_name, qr_code_data, company_id) VALUES (?, ?, ?, ?)';
-      values = [table_number, table_name || `Table ${table_number}`, qr_code_data, company_id];
+    // We know group_id exists because we update the schema on startup
+    // However, if the user sends an invalid group_id, it will crash with FK error.
+    // Validate group_id if provided
+    if (group_id) {
+      console.log(`[DEBUG] Validating group_id: ${group_id} for company: ${company_id}`);
+      const [groupExists] = await connection.execute(
+        'SELECT id FROM table_groups WHERE id = ? AND company_id = ?',
+        [group_id, company_id]
+      );
+      console.log(`[DEBUG] Group validation result: ${JSON.stringify(groupExists)}`);
+      if (groupExists.length === 0) {
+        await connection.rollback();
+        console.log('[DEBUG] Invalid group_id');
+        return res.status(400).json({ success: false, message: 'Invalid Table Group selected.' });
+      }
     }
 
-    const [result] = await connection.execute(query, values);
-    await connection.commit();
+    const query = 'INSERT INTO restaurant_tables (table_number, table_name, qr_code_data, group_id, company_id, branch_id) VALUES (?, ?, ?, ?, ?, ?)';
+    const values = [table_number, table_name || `Table ${table_number}`, qr_code_data, group_id || null, company_id, branch_id || null];
 
-    // Get the newly created table
-    let getQuery;
-    if (columnCheck.length > 0) {
-      getQuery = `SELECT rt.*, COALESCE(tg.name, "Non AC") as group_name FROM restaurant_tables rt LEFT JOIN table_groups tg ON rt.group_id = tg.id WHERE rt.id = ?`;
-    } else {
-      getQuery = 'SELECT *, "Non AC" as group_name FROM restaurant_tables WHERE id = ?';
+    console.log('[DEBUG] Executing Query:', query);
+    console.log('[DEBUG] Values:', values);
+
+    // Try-catch specific to insertion to capture SQL errors
+    try {
+      const [result] = await connection.execute(query, values);
+      console.log('[DEBUG] Insert success, ID:', result.insertId);
+      await connection.commit();
+
+      // Get the newly created table
+      // FIX: Use single quotes for string literal 'Non AC' to avoid it being interpreted as a column identifier
+      const [newTable] = await pool.execute(
+        `SELECT rt.*, COALESCE(tg.name, 'Non AC') as group_name FROM restaurant_tables rt LEFT JOIN table_groups tg ON rt.group_id = tg.id WHERE rt.id = ?`,
+        [result.insertId]
+      );
+
+      res.json({ success: true, data: newTable[0] });
+
+    } catch (insertError) {
+      console.error('[DEBUG] Insert Error:', insertError);
+      throw insertError; // Re-throw to be caught by outer catch
     }
-
-    const [newTable] = await pool.execute(getQuery, [result.insertId]);
-
-    res.json({ success: true, data: newTable[0] });
 
   } catch (error) {
-    await connection.rollback();
-    console.error('Error creating table:', error);
+    if (connection) await connection.rollback();
+    console.error('Error creating table [CRITICAL]:', error);
+    console.error('Error Code:', error.code);
+    console.error('Error Message:', error.sqlMessage || error.message);
     res.status(500).json({
       success: false,
       message: 'Failed to create table',
-      error: error.message
+      error: error.message,
+      debug_info: {
+        code: error.code,
+        sqlMessage: error.sqlMessage
+      }
     });
+
   } finally {
-    connection.release();
+    if (connection) connection.release();
   }
 });
+
+// START DEBUG ENDPOINT
+app.get('/api/debug/schema/:tableName', async (req, res) => {
+  try {
+    const { tableName } = req.params;
+    const [columns] = await pool.execute(
+      `SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_TYPE 
+       FROM INFORMATION_SCHEMA.COLUMNS 
+       WHERE TABLE_NAME = ? AND TABLE_SCHEMA = DATABASE()`,
+      [tableName]
+    );
+    res.json({ success: true, table: tableName, columns });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+// END DEBUG ENDPOINT
 
 app.put('/api/tables/:id', authenticateToken, async (req, res) => {
   try {
@@ -753,7 +1050,15 @@ app.post('/api/table-groups', authenticateToken, async (req, res) => {
     res.json({ success: true, data: newGroup[0] });
   } catch (error) {
     console.error('Error creating table group:', error);
-    res.status(500).json({ success: false, message: 'Failed to create table group', error: error.message });
+    res.status(500).json({
+      success: false,
+      message: 'Failed to create table group',
+      error: error.message,
+      debug_info: {
+        code: error.code,
+        sqlMessage: error.sqlMessage
+      }
+    });
   }
 });
 
@@ -798,7 +1103,7 @@ app.delete('/api/table-groups/:id', authenticateToken, async (req, res) => {
 });
 
 // Category endpoints with enhanced error handling
-app.get('/api/categories', resolveCompany, async (req, res) => {
+app.get('/api/categories', authenticateToken, async (req, res) => {
   try {
     console.log('Fetching categories...');
     let companyId = req.company ? req.company.id : null;
@@ -926,7 +1231,7 @@ app.delete('/api/categories/:name', authenticateToken, async (req, res) => {
 // Order endpoints
 app.get('/api/orders', authenticateToken, async (req, res) => {
   try {
-    const { status, start_date, end_date, table_number, customer_id } = req.query;
+    const { status, start_date, end_date, table_number, customer_id, branch_id } = req.query;
     const { company_id } = req.user;
 
     // First, get the orders based on filters
@@ -957,6 +1262,11 @@ app.get('/api/orders', authenticateToken, async (req, res) => {
     if (end_date) {
       conditions.push('created_at <= ?');
       params.push(end_date);
+    }
+
+    if (branch_id && branch_id !== 'null' && branch_id !== 'undefined') {
+      conditions.push('branch_id = ?');
+      params.push(branch_id);
     }
 
     if (conditions.length > 0) {
@@ -995,12 +1305,12 @@ app.get('/api/orders', authenticateToken, async (req, res) => {
 
 // Add more logging to the order creation endpoint
 // Add more logging to the order creation endpoint
-app.post('/api/orders', resolveCompany, async (req, res) => {
+app.post('/api/orders', authenticateToken, async (req, res) => {
   const connection = await pool.getConnection();
   try {
     await connection.beginTransaction();
 
-    const { table_number, items, currency, payment_method, customer_id } = req.body;
+    const { table_number, items, currency, payment_method, customer_id, branch_id } = req.body;
     let companyId = req.company ? req.company.id : null;
 
     // Fallback: Try to get company_id from token if not resolved from slug
@@ -1034,10 +1344,15 @@ app.post('/api/orders', resolveCompany, async (req, res) => {
       });
     }
 
-    const [tableRows] = await connection.execute(
-      'SELECT id FROM restaurant_tables WHERE table_number = ? AND company_id = ?',
-      [table_number, companyId]
-    );
+    // Use branch_id to uniquely identify table if provided
+    let tableQuery = 'SELECT id, branch_id FROM restaurant_tables WHERE table_number = ? AND company_id = ?';
+    const tableParams = [table_number, companyId];
+    if (branch_id) {
+      tableQuery += ' AND branch_id = ?';
+      tableParams.push(branch_id);
+    }
+
+    const [tableRows] = await connection.execute(tableQuery, tableParams);
 
     if (tableRows.length === 0) {
       await connection.rollback();
@@ -1045,6 +1360,8 @@ app.post('/api/orders', resolveCompany, async (req, res) => {
     }
 
     const table_id = tableRows[0].id;
+    // Use the branch_id from the table if we didn't get one (or verify match)
+    const finalBranchId = branch_id || tableRows[0].branch_id;
 
     let total_inr = 0;
     let total_usd = 0;
@@ -1066,11 +1383,12 @@ app.post('/api/orders', resolveCompany, async (req, res) => {
     let insertQuery, insertValues;
 
     if (columnCheck.length > 0) {
-      insertQuery = 'INSERT INTO orders (table_id, table_number, customer_id, total_amount_inr, total_amount_usd, currency, payment_method, order_status, payment_status, company_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
-      insertValues = [table_id, table_number, customer_id || null, total_inr.toFixed(2), total_usd.toFixed(2), currency, payment_method, 'pending', payment_method === 'cash' ? 'pending' : 'paid', companyId];
+      insertQuery = 'INSERT INTO orders (table_id, table_number, customer_id, total_amount_inr, total_amount_usd, currency, payment_method, order_status, payment_status, company_id, branch_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
+      insertValues = [table_id, table_number, customer_id || null, total_inr.toFixed(2), total_usd.toFixed(2), currency, payment_method, 'pending', payment_method === 'cash' ? 'pending' : 'paid', companyId, finalBranchId || null];
     } else {
-      insertQuery = 'INSERT INTO orders (table_id, table_number, customer_id, total_amount_inr, total_amount_usd, currency, payment_method, order_status, payment_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)';
-      insertValues = [table_id, table_number, customer_id || null, total_inr.toFixed(2), total_usd.toFixed(2), currency, payment_method, 'pending', payment_method === 'cash' ? 'pending' : 'paid'];
+      // Fallback if company_id missing (unlikely given check)
+      insertQuery = 'INSERT INTO orders (table_id, table_number, customer_id, total_amount_inr, total_amount_usd, currency, payment_method, order_status, payment_status, branch_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
+      insertValues = [table_id, table_number, customer_id || null, total_inr.toFixed(2), total_usd.toFixed(2), currency, payment_method, 'pending', payment_method === 'cash' ? 'pending' : 'paid', finalBranchId || null];
     }
 
     const [orderResult] = await connection.execute(insertQuery, insertValues);
@@ -1118,7 +1436,42 @@ app.post('/api/orders', resolveCompany, async (req, res) => {
 app.put('/api/orders/:id/status', authenticateToken, async (req, res) => {
   try {
     const { order_status } = req.body;
-    const { company_id } = req.user;
+
+    console.log('[ORDER STATUS] Updating order:', req.params.id, 'to status:', order_status);
+    console.log('[ORDER STATUS] User:', req.user?.id, 'User company:', req.user?.company_id);
+
+    // Resolve company_id (same logic as customer orders fetch)
+    let company_id = null;
+
+    // Priority 1: From middleware
+    if (req.company && req.company.id) {
+      company_id = req.company.id;
+    }
+
+    // Priority 2: From header
+    if (!company_id && req.headers['x-company-id']) {
+      company_id = parseInt(req.headers['x-company-id']);
+    }
+
+    // Priority 3: From user
+    if (!company_id && req.user && req.user.company_id) {
+      company_id = req.user.company_id;
+    }
+
+    // Priority 4: Get from the order itself
+    if (!company_id) {
+      const [orderRows] = await pool.execute('SELECT company_id FROM orders WHERE id = ?', [req.params.id]);
+      if (orderRows.length > 0) {
+        company_id = orderRows[0].company_id;
+        console.log('[ORDER STATUS] Got company_id from order:', company_id);
+      }
+    }
+
+    console.log('[ORDER STATUS] Resolved company_id:', company_id);
+
+    if (!company_id) {
+      return res.status(400).json({ success: false, message: 'Could not determine company context' });
+    }
 
     const [result] = await pool.execute(
       'UPDATE orders SET order_status = ? WHERE id = ? AND company_id = ?',
@@ -1126,18 +1479,159 @@ app.put('/api/orders/:id/status', authenticateToken, async (req, res) => {
     );
 
     if (result.affectedRows === 0) {
+      console.log('[ORDER STATUS] No rows updated - order not found or wrong company');
       return res.status(404).json({ success: false, message: 'Order not found or access denied' });
     }
 
     const [updatedOrder] = await pool.execute('SELECT * FROM orders WHERE id = ?', [req.params.id]);
     io.to(`company_${company_id}`).emit('order-status-updated', updatedOrder[0]);
 
+    console.log('[ORDER STATUS] Successfully updated order');
     res.json({ success: true, data: updatedOrder[0] });
   } catch (error) {
-    console.error('Error updating order status:', error);
+    console.error('[ORDER STATUS] Error:', error);
     res.status(500).json({
       success: false,
       message: 'Failed to update order status',
+      error: error.message
+    });
+  }
+});
+
+// Cancel Order Item
+app.put('/api/orders/:orderId/items/:itemId/cancel', authenticateToken, async (req, res) => {
+  try {
+    const { orderId, itemId } = req.params;
+    const { reason } = req.body;
+
+    console.log('[CANCEL ITEM] Order:', orderId, 'Item:', itemId, 'Reason:', reason);
+
+    // Resolve company_id (same logic as order status)
+    let company_id = null;
+    if (req.company && req.company.id) {
+      company_id = req.company.id;
+    }
+    if (!company_id && req.headers['x-company-id']) {
+      company_id = parseInt(req.headers['x-company-id']);
+    }
+    if (!company_id && req.user && req.user.company_id) {
+      company_id = req.user.company_id;
+    }
+
+    // Get company_id from order if still not found
+    if (!company_id) {
+      const [orderRows] = await pool.execute('SELECT company_id FROM orders WHERE id = ?', [orderId]);
+      if (orderRows.length > 0) {
+        company_id = orderRows[0].company_id;
+      }
+    }
+
+    console.log('[CANCEL ITEM] Resolved company_id:', company_id);
+
+    // Delete the item from order_items
+    const [deleteResult] = await pool.execute(
+      'DELETE FROM order_items WHERE id = ? AND order_id = ?',
+      [itemId, orderId]
+    );
+
+    if (deleteResult.affectedRows === 0) {
+      console.log('[CANCEL ITEM] Item not found');
+      return res.status(404).json({ success: false, message: 'Item not found' });
+    }
+
+    // Recalculate order total
+    const [remainingItems] = await pool.execute(
+      'SELECT SUM(price_inr * quantity) as total_inr, SUM(price_usd * quantity) as total_usd FROM order_items WHERE order_id = ?',
+      [orderId]
+    );
+
+    if (remainingItems[0].total_inr === null) {
+      // No items left - cancel the entire order
+      await pool.execute(
+        'UPDATE orders SET order_status = ? WHERE id = ?',
+        ['cancelled', orderId]
+      );
+      console.log('[CANCEL ITEM] All items cancelled - order cancelled');
+    } else {
+      // Update order total
+      await pool.execute(
+        'UPDATE orders SET total_amount_inr = ?, total_amount_usd = ? WHERE id = ?',
+        [remainingItems[0].total_inr || 0, remainingItems[0].total_usd || 0, orderId]
+      );
+      console.log('[CANCEL ITEM] Order total updated');
+    }
+
+    // Emit socket event
+    if (company_id) {
+      io.to(`company_${company_id}`).emit('order-updated', { orderId, itemId, action: 'item_cancelled' });
+    }
+
+    console.log('[CANCEL ITEM] Successfully cancelled item');
+    res.json({ success: true, message: 'Item cancelled successfully' });
+  } catch (error) {
+    console.error('[CANCEL ITEM] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to cancel item',
+      error: error.message
+    });
+  }
+});
+
+// Cancel Entire Order
+app.put('/api/orders/:orderId/cancel', authenticateToken, async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const { reason } = req.body;
+
+    console.log('[CANCEL ORDER] Order:', orderId, 'Reason:', reason);
+
+    // Resolve company_id
+    let company_id = null;
+    if (req.company && req.company.id) {
+      company_id = req.company.id;
+    }
+    if (!company_id && req.headers['x-company-id']) {
+      company_id = parseInt(req.headers['x-company-id']);
+    }
+    if (!company_id && req.user && req.user.company_id) {
+      company_id = req.user.company_id;
+    }
+
+    // Get company_id from order if needed
+    if (!company_id) {
+      const [orderRows] = await pool.execute('SELECT company_id FROM orders WHERE id = ?', [orderId]);
+      if (orderRows.length > 0) {
+        company_id = orderRows[0].company_id;
+      }
+    }
+
+    console.log('[CANCEL ORDER] Resolved company_id:', company_id);
+
+    // Update order status to cancelled
+    const [result] = await pool.execute(
+      'UPDATE orders SET order_status = ? WHERE id = ?',
+      ['cancelled', orderId]
+    );
+
+    if (result.affectedRows === 0) {
+      console.log('[CANCEL ORDER] Order not found');
+      return res.status(404).json({ success: false, message: 'Order not found' });
+    }
+
+    // Emit socket event
+    if (company_id) {
+      const [updatedOrder] = await pool.execute('SELECT * FROM orders WHERE id = ?', [orderId]);
+      io.to(`company_${company_id}`).emit('order-status-updated', updatedOrder[0]);
+    }
+
+    console.log('[CANCEL ORDER] Successfully cancelled order');
+    res.json({ success: true, message: 'Order cancelled successfully' });
+  } catch (error) {
+    console.error('[CANCEL ORDER] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to cancel order',
       error: error.message
     });
   }
@@ -1498,42 +1992,40 @@ const getPreviousPeriodDateRange = (period) => {
 // Get summary analytics - UPDATED
 app.get('/api/analytics/summary', authenticateToken, async (req, res) => {
   try {
-    const { period = 'daily', currency = 'INR' } = req.query;
+    const { period = 'daily', currency = 'INR', branch_id } = req.query;
     const { company_id } = req.user;
     const { startDate, endDate } = getDateRangeForPeriod(period);
+
+    // Build branch filter params
+    const branchCondition = (branch_id && branch_id !== 'null' && branch_id !== 'undefined') ? ' AND branch_id = ?' : '';
+    const baseParams = [startDate, endDate, company_id];
+    if (branchCondition) baseParams.push(branch_id);
 
     // Total orders
     const [totalOrdersResult] = await pool.execute(`
       SELECT COUNT(*) as total_orders
       FROM orders
-      WHERE created_at >= ? AND created_at < ? AND company_id = ?
-    `, [startDate, endDate, company_id]);
+      WHERE created_at >= ? AND created_at < ? AND company_id = ?${branchCondition}
+    `, baseParams);
     const totalOrders = totalOrdersResult[0].total_orders;
 
     // Total revenue - use different queries based on currency
     let totalRevenue;
-    if (currency === 'INR') {
-      const [totalRevenueResult] = await pool.execute(`
-        SELECT SUM(total_amount_inr) as total_revenue
-        FROM orders
-        WHERE created_at >= ? AND created_at < ? AND company_id = ?
-      `, [startDate, endDate, company_id]);
-      totalRevenue = totalRevenueResult[0].total_revenue || 0;
-    } else {
-      const [totalRevenueResult] = await pool.execute(`
-        SELECT SUM(total_amount_usd) as total_revenue
-        FROM orders
-        WHERE created_at >= ? AND created_at < ? AND company_id = ?
-      `, [startDate, endDate, company_id]);
-      totalRevenue = totalRevenueResult[0].total_revenue || 0;
-    }
+    const revenueColumn = currency === 'INR' ? 'total_amount_inr' : 'total_amount_usd';
+
+    const [totalRevenueResult] = await pool.execute(`
+      SELECT SUM(${revenueColumn}) as total_revenue
+      FROM orders
+      WHERE created_at >= ? AND created_at < ? AND company_id = ?${branchCondition}
+    `, baseParams);
+    totalRevenue = totalRevenueResult[0].total_revenue || 0;
 
     // Tables served
     const [tablesServedResult] = await pool.execute(`
       SELECT COUNT(DISTINCT table_id) as tables_served
       FROM orders
-      WHERE created_at >= ? AND created_at < ? AND company_id = ?
-    `, [startDate, endDate, company_id]);
+      WHERE created_at >= ? AND created_at < ? AND company_id = ?${branchCondition}
+    `, baseParams);
     const tablesServed = tablesServedResult[0].tables_served || 0;
 
     // Average order value
@@ -1543,8 +2035,8 @@ app.get('/api/analytics/summary', authenticateToken, async (req, res) => {
     const [customersResult] = await pool.execute(`
       SELECT COUNT(DISTINCT customer_id) as total_customers
       FROM orders
-      WHERE created_at >= ? AND created_at < ? AND company_id = ?
-    `, [startDate, endDate, company_id]);
+      WHERE created_at >= ? AND created_at < ? AND company_id = ?${branchCondition}
+    `, baseParams);
     const totalCustomers = customersResult[0].total_customers || 0;
 
     // Average items per order
@@ -1554,10 +2046,10 @@ app.get('/api/analytics/summary', authenticateToken, async (req, res) => {
         SELECT o.id, COUNT(oi.id) as item_count
         FROM orders o
         LEFT JOIN order_items oi ON o.id = oi.order_id
-        WHERE o.created_at >= ? AND o.created_at < ? AND o.company_id = ?
+        WHERE o.created_at >= ? AND o.created_at < ? AND o.company_id = ?${branchCondition.replace('branch_id', 'o.branch_id')}
         GROUP BY o.id
       ) as order_items_count
-    `, [startDate, endDate, company_id]);
+    `, baseParams);
     const avgItemsPerOrder = avgItemsResult[0].avg_items_per_order || 0;
 
     res.json({
@@ -1583,11 +2075,17 @@ app.get('/api/analytics/summary', authenticateToken, async (req, res) => {
 
 // Get revenue and orders over time
 // Get revenue and orders over time
+// Get revenue and orders over time
 app.get('/api/analytics/revenue-orders', authenticateToken, async (req, res) => {
   try {
-    const { period = 'daily', currency = 'INR' } = req.query;
+    const { period = 'daily', currency = 'INR', branch_id } = req.query;
     const { company_id } = req.user;
     const { startDate, endDate } = getDateRangeForPeriod(period);
+
+    // Build branch filter params
+    const branchCondition = (branch_id && branch_id !== 'null' && branch_id !== 'undefined') ? ' AND branch_id = ?' : '';
+    const queryParams = [startDate, endDate, company_id];
+    if (branchCondition) queryParams.push(branch_id);
 
     let groupBy, dateFormat;
     switch (period) {
@@ -1623,10 +2121,10 @@ app.get('/api/analytics/revenue-orders', authenticateToken, async (req, res) => 
       COUNT(DISTINCT table_id) as tables_used,
       COALESCE(AVG(${revenueColumn}), 0) as avg_order_value
       FROM orders 
-      WHERE created_at >= ? AND created_at < ? AND company_id = ?
+      WHERE created_at >= ? AND created_at < ? AND company_id = ?${branchCondition}
       GROUP BY ${groupBy}
       ORDER BY date_group
-      `, [startDate, endDate, company_id]);
+      `, queryParams);
 
     // Format the data for the chart
     const formattedData = results.map(row => ({
@@ -1653,13 +2151,13 @@ app.get('/api/analytics/revenue-orders', authenticateToken, async (req, res) => 
 // Get top items - UPDATED
 app.get('/api/analytics/top-items', authenticateToken, async (req, res) => {
   try {
-    const { period = 'daily', currency = 'INR' } = req.query;
+    const { period = 'daily', currency = 'INR', branch_id } = req.query;
     const { company_id } = req.user;
     const { startDate, endDate } = getDateRangeForPeriod(period);
 
     const revenueColumn = currency === 'INR' ? 'oi.price_inr' : 'oi.price_usd';
 
-    const [results] = await pool.execute(`
+    let query = `
       SELECT 
         mi.id,
       mi.name as item_name,
@@ -1672,10 +2170,21 @@ app.get('/api/analytics/top-items', authenticateToken, async (req, res) => {
       JOIN orders o ON oi.order_id = o.id
       JOIN menu_items mi ON oi.menu_item_id = mi.id
       WHERE o.created_at >= ? AND o.created_at < ? AND o.company_id = ?
+    `;
+
+    const params = [startDate, endDate, company_id];
+    if (branch_id && branch_id !== 'null' && branch_id !== 'undefined') {
+      query += ' AND o.branch_id = ?';
+      params.push(branch_id);
+    }
+
+    query += `
       GROUP BY mi.id, mi.name, mi.category
       ORDER BY quantity_sold DESC
       LIMIT 10
-      `, [startDate, endDate, company_id]);
+    `;
+
+    const [results] = await pool.execute(query, params);
 
     // Format the data for the chart
     const formattedData = results.map(row => ({
@@ -1697,13 +2206,13 @@ app.get('/api/analytics/top-items', authenticateToken, async (req, res) => {
 // Get category performance
 app.get('/api/analytics/category-performance', authenticateToken, async (req, res) => {
   try {
-    const { period = 'daily', currency = 'INR' } = req.query;
+    const { period = 'daily', currency = 'INR', branch_id } = req.query;
     const { company_id } = req.user;
     const { startDate, endDate } = getDateRangeForPeriod(period);
 
     const revenueColumn = currency === 'INR' ? 'oi.price_inr' : 'oi.price_usd';
 
-    const [results] = await pool.execute(`
+    let query = `
       SELECT 
         mi.category,
       COUNT(DISTINCT o.id) as total_orders,
@@ -1714,9 +2223,20 @@ app.get('/api/analytics/category-performance', authenticateToken, async (req, re
       JOIN orders o ON oi.order_id = o.id
       JOIN menu_items mi ON oi.menu_item_id = mi.id
       WHERE o.created_at >= ? AND o.created_at < ? AND o.company_id = ?
+    `;
+
+    const params = [startDate, endDate, company_id];
+    if (branch_id && branch_id !== 'null' && branch_id !== 'undefined') {
+      query += ' AND o.branch_id = ?';
+      params.push(branch_id);
+    }
+
+    query += `
       GROUP BY mi.category
       ORDER BY total_revenue DESC
-      `, [startDate, endDate, company_id]);
+    `;
+
+    const [results] = await pool.execute(query, params);
 
     // Format the data for the chart
     const formattedData = results.map(row => ({
@@ -1738,9 +2258,15 @@ app.get('/api/analytics/category-performance', authenticateToken, async (req, re
 
 app.get('/api/analytics/customer-retention', authenticateToken, async (req, res) => {
   try {
-    const { period = 'daily' } = req.query;
+    const { period = 'daily', branch_id } = req.query;
     const { company_id } = req.user;
     const { startDate, endDate } = getDateRangeForPeriod(period);
+
+    // Build branch conditions
+    const branchConditionAlias = (branch_id && branch_id !== 'null' && branch_id !== 'undefined') ? ' AND o.branch_id = ?' : '';
+    const branchConditionNoAlias = (branch_id && branch_id !== 'null' && branch_id !== 'undefined') ? ' AND branch_id = ?' : '';
+    const queryParams = [startDate, endDate, company_id];
+    if (branchConditionAlias) queryParams.push(branch_id);
 
     // Get customer retention data
     const [retentionData] = await pool.execute(`
@@ -1755,14 +2281,15 @@ app.get('/api/analytics/customer-retention', authenticateToken, async (req, res)
         DATE(o.created_at) as created_at,
         COUNT(*) as order_count
         FROM orders o
-        WHERE o.created_at >= ? AND o.created_at < ? AND o.company_id = ?
+        WHERE o.created_at >= ? AND o.created_at < ? AND o.company_id = ?${branchConditionAlias}
         GROUP BY o.customer_id, DATE(o.created_at)
       ) as customer_data
       GROUP BY DATE(created_at)
       ORDER BY date
-      `, [startDate, endDate, company_id]);
+      `, queryParams);
 
     // Calculate overall retention rate
+    // Note: Reusing queryParams logic might be tricky if params count differs. It matches here (3 params + 1 optional).
     const [retentionRate] = await pool.execute(`
       SELECT 
         COUNT(DISTINCT CASE WHEN order_count > 1 THEN customer_id END) as returning_customers,
@@ -1772,10 +2299,10 @@ app.get('/api/analytics/customer-retention', authenticateToken, async (req, res)
           customer_id,
         COUNT(*) as order_count
         FROM orders
-        WHERE created_at >= ? AND created_at < ? AND company_id = ?
+        WHERE created_at >= ? AND created_at < ? AND company_id = ?${branchConditionNoAlias}
         GROUP BY customer_id
       ) as customer_data
-    `, [startDate, endDate, company_id]);
+    `, queryParams);
 
     const rate = retentionRate[0].total_customers > 0
       ? (retentionRate[0].returning_customers / retentionRate[0].total_customers * 100).toFixed(1)
@@ -1804,24 +2331,37 @@ app.get('/api/analytics/customer-retention', authenticateToken, async (req, res)
 // Get table performance
 app.get('/api/analytics/table-performance', authenticateToken, async (req, res) => {
   try {
-    const { period = 'daily', currency = 'INR' } = req.query;
+    const { period = 'daily', currency = 'INR', branch_id } = req.query;
     const { company_id } = req.user;
     const { startDate, endDate } = getDateRangeForPeriod(period);
 
     const revenueColumn = currency === 'INR' ? 'total_amount_inr' : 'total_amount_usd';
 
-    const [results] = await pool.execute(`
+    let query = `
       SELECT 
-        table_number,
+        o.table_number,
+        COALESCE(rt.table_name, CONCAT('Table ', o.table_number)) as table_name,
         COUNT(*) as total_orders,
-        COALESCE(SUM(${revenueColumn}), 0) as total_revenue,
-        COALESCE(AVG(${revenueColumn}), 0) as avg_order_value,
-        MAX(created_at) as last_order
-      FROM orders
-      WHERE created_at >= ? AND created_at < ? AND company_id = ?
-      GROUP BY table_number
+        COALESCE(SUM(o.${revenueColumn}), 0) as total_revenue,
+        COALESCE(AVG(o.${revenueColumn}), 0) as avg_order_value,
+        MAX(o.created_at) as last_order
+      FROM orders o
+      LEFT JOIN restaurant_tables rt ON o.table_id = rt.id
+      WHERE o.created_at >= ? AND o.created_at < ? AND o.company_id = ?
+    `;
+
+    const params = [startDate, endDate, company_id];
+    if (branch_id && branch_id !== 'null' && branch_id !== 'undefined') {
+      query += ' AND o.branch_id = ?';
+      params.push(branch_id);
+    }
+
+    query += `
+      GROUP BY o.table_number, rt.table_name, rt.id
       ORDER BY total_revenue DESC
-    `, [startDate, endDate, company_id]);
+    `;
+
+    const [results] = await pool.execute(query, params);
 
     // Format the data
     const formattedData = results.map(row => ({
@@ -1843,11 +2383,11 @@ app.get('/api/analytics/table-performance', authenticateToken, async (req, res) 
 
 app.get('/api/analytics/hourly-orders', authenticateToken, async (req, res) => {
   try {
-    const { period = 'daily' } = req.query;
+    const { period = 'daily', branch_id } = req.query;
     const { company_id } = req.user;
     const { startDate, endDate } = getDateRangeForPeriod(period);
 
-    const [results] = await pool.execute(`
+    let query = `
       SELECT 
         HOUR(created_at) as hour,
         COUNT(*) as orders,
@@ -1856,9 +2396,20 @@ app.get('/api/analytics/hourly-orders', authenticateToken, async (req, res) => {
         COUNT(DISTINCT table_id) as tables_used
       FROM orders
       WHERE created_at >= ? AND created_at < ? AND company_id = ?
+    `;
+
+    const params = [startDate, endDate, company_id];
+    if (branch_id && branch_id !== 'null' && branch_id !== 'undefined') {
+      query += ' AND branch_id = ?';
+      params.push(branch_id);
+    }
+
+    query += `
       GROUP BY HOUR(created_at)
       ORDER BY hour
-    `, [startDate, endDate, company_id]);
+    `;
+
+    const [results] = await pool.execute(query, params);
 
     // Fill in missing hours with 0 orders
     const hourlyData = [];
@@ -1888,18 +2439,29 @@ app.get('/api/analytics/hourly-orders', authenticateToken, async (req, res) => {
 // Get payment methods distribution
 app.get('/api/analytics/payment-methods', authenticateToken, async (req, res) => {
   try {
-    const { period = 'daily' } = req.query;
+    const { period = 'daily', branch_id } = req.query;
     const { company_id } = req.user;
     const { startDate, endDate } = getDateRangeForPeriod(period);
 
-    const [results] = await pool.execute(`
-    SELECT
-    payment_method,
-      COUNT(*) as count
-      FROM orders
-      WHERE created_at >= ? AND created_at < ? AND company_id = ?
+    let query = `
+     SELECT
+     payment_method,
+       COUNT(*) as count
+       FROM orders
+       WHERE created_at >= ? AND created_at < ? AND company_id = ?
+    `;
+
+    const params = [startDate, endDate, company_id];
+    if (branch_id && branch_id !== 'null' && branch_id !== 'undefined') {
+      query += ' AND branch_id = ?';
+      params.push(branch_id);
+    }
+
+    query += `
       GROUP BY payment_method
-        `, [startDate, endDate, company_id]);
+    `;
+
+    const [results] = await pool.execute(query, params);
 
     // Convert to object format for the chart
     const paymentMethods = {};
@@ -1921,42 +2483,40 @@ app.get('/api/analytics/payment-methods', authenticateToken, async (req, res) =>
 // Get previous period data for comparison
 app.get('/api/analytics/previous-period', authenticateToken, async (req, res) => {
   try {
-    const { period = 'daily', currency = 'INR' } = req.query;
+    const { period = 'daily', currency = 'INR', branch_id } = req.query;
     const { company_id } = req.user;
     const { startDate, endDate } = getPreviousPeriodDateRange(period);
+
+    const branchCondition = (branch_id && branch_id !== 'null' && branch_id !== 'undefined') ? ' AND branch_id = ?' : '';
+    const queryParams = [startDate, endDate, company_id];
+    if (branchCondition) queryParams.push(branch_id);
 
     // Total orders
     const [totalOrdersResult] = await pool.execute(`
       SELECT COUNT(*) as total_orders
       FROM orders
-      WHERE created_at >= ? AND created_at < ? AND company_id = ?
-      `, [startDate, endDate, company_id]);
+      WHERE created_at >= ? AND created_at < ? AND company_id = ?${branchCondition}
+      `, queryParams);
     const totalOrders = totalOrdersResult[0].total_orders;
 
-    // Total revenue - use different queries based on currency
-    let totalRevenue;
-    if (currency === 'INR') {
-      const [totalRevenueResult] = await pool.execute(`
-        SELECT SUM(total_amount_inr) as total_revenue
+    // Total revenue - use dynamic column
+    const revenueColumn = currency === 'INR' ? 'total_amount_inr' : 'total_amount_usd';
+    const [totalRevenueResult] = await pool.execute(`
+        SELECT SUM(${revenueColumn}) as total_revenue
         FROM orders
-        WHERE created_at >= ? AND created_at < ? AND company_id = ?
-      `, [startDate, endDate, company_id]);
-      totalRevenue = totalRevenueResult[0].total_revenue || 0;
-    } else {
-      const [totalRevenueResult] = await pool.execute(`
-        SELECT SUM(total_amount_usd) as total_revenue
-        FROM orders
-        WHERE created_at >= ? AND created_at < ? AND company_id = ?
-      `, [startDate, endDate, company_id]);
-      totalRevenue = totalRevenueResult[0].total_revenue || 0;
-    }
+        WHERE created_at >= ? AND created_at < ? AND company_id = ?${branchCondition}
+      `, queryParams);
+
+    // Fallback? pool.execute returns rows. 
+    // Wait, the syntax I wrote: SUM(${revenueColumn}) is template literal injection.
+    const totalRevenue = totalRevenueResult[0].total_revenue || 0;
 
     // Tables served
     const [tablesServedResult] = await pool.execute(`
       SELECT COUNT(DISTINCT table_id) as tables_served
       FROM orders
-      WHERE created_at >= ? AND created_at < ? AND company_id = ?
-      `, [startDate, endDate, company_id]);
+      WHERE created_at >= ? AND created_at < ? AND company_id = ?${branchCondition}
+      `, queryParams);
     const tablesServed = tablesServedResult[0].tables_served || 0;
 
     // Average order value
@@ -1984,6 +2544,9 @@ app.get('/api/analytics/previous-period', authenticateToken, async (req, res) =>
 // User authentication endpoints
 app.post('/api/auth/register', async (req, res) => {
   try {
+    // Ensure critical schema (including users.company_id) is present before we insert
+    await updateDatabaseSchema();
+
     // Extract role from request body with default value of 'customer'
     const { fullName, email, password, role = 'customer' } = req.body;
 
@@ -2005,36 +2568,88 @@ app.post('/api/auth/register', async (req, res) => {
     const slug = email.split('@')[0].toLowerCase().replace(/[^a-z0-9]/g, '');
     const companyName = fullName + "'s Restaurant";
 
-    // Check if company exists (by slug)
+    // Check if company exists (by slug). Some older databases may not yet have the
+    // `slug` or `domain` columns, so we wrap this in a try/catch and gracefully
+    // fall back when needed.
     let companyId;
-    const [existingCompany] = await pool.execute(
-      'SELECT id FROM companies WHERE slug = ?',
-      [slug]
-    );
+    let companySlugForUrl = slug;
 
-    if (existingCompany.length > 0) {
-      companyId = existingCompany[0].id;
-    } else {
-      // Create new company. Some databases may not yet have the `domain` column,
-      // so we first try the new schema and gracefully fall back if needed.
-      try {
-        const [newCompanyResult] = await pool.execute(
-          'INSERT INTO companies (name, slug, domain) VALUES (?, ?, ?)',
-          [companyName, slug, `${slug}.vercel.app`]
-        );
-        companyId = newCompanyResult.insertId;
-      } catch (err) {
-        // If the `domain` column doesn't exist in this environment, fall back
-        // to the older schema without breaking existing functionality.
-        if (err.code === 'ER_BAD_FIELD_ERROR' && err.message.includes('domain')) {
+    try {
+      const [existingCompany] = await pool.execute(
+        'SELECT id FROM companies WHERE slug = ?',
+        [slug]
+      );
+
+      if (existingCompany.length > 0) {
+        companyId = existingCompany[0].id;
+      } else {
+        // Create new company with slug (and domain if column exists)
+        try {
           const [newCompanyResult] = await pool.execute(
-            'INSERT INTO companies (name, slug) VALUES (?, ?)',
-            [companyName, slug]
+            'INSERT INTO companies (name, slug, domain) VALUES (?, ?, ?)',
+            [companyName, slug, `${slug}.vercel.app`]
           );
           companyId = newCompanyResult.insertId;
-        } else {
-          throw err;
+
+          // --- VERCEL SUBDOMAIN INTEGRATION ---
+          // Attempt to add this new subdomain to the Vercel project
+          if (process.env.VERCEL_TOKEN && process.env.VERCEL_PROJECT_ID) {
+            const baseDomain = process.env.FRONTEND_URL
+              ? process.env.FRONTEND_URL.replace(/(^\w+:|^)\/\//, '')
+              : null;
+
+            if (baseDomain) {
+              const cleanBase = baseDomain.replace(/^www\./, '');
+              const fullDomain = `${slug}.${cleanBase}`;
+              console.log(`Attempting to add domain to Vercel: ${fullDomain}`);
+
+              // Don't await this to prevent blocking registration if it fails or is slow
+              fetch(`https://api.vercel.com/v9/projects/${process.env.VERCEL_PROJECT_ID}/domains`, {
+                method: 'POST',
+                headers: {
+                  'Authorization': `Bearer ${process.env.VERCEL_TOKEN}`,
+                  'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ name: fullDomain })
+              })
+                .then(async (vRes) => {
+                  if (!vRes.ok) {
+                    const errText = await vRes.text();
+                    console.error('Vercel API Error:', errText);
+                  } else {
+                    console.log('Successfully added domain to Vercel:', fullDomain);
+                  }
+                })
+                .catch(err => console.error('Failed to call Vercel API:', err));
+            }
+          }
+          // ------------------------------------
+
+        } catch (err) {
+          if (err.code === 'ER_BAD_FIELD_ERROR' && err.message.includes('domain')) {
+            const [newCompanyResult] = await pool.execute(
+              'INSERT INTO companies (name, slug) VALUES (?, ?)',
+              [companyName, slug]
+            );
+            companyId = newCompanyResult.insertId;
+          } else {
+            throw err;
+          }
         }
+      }
+    } catch (err) {
+      // If the `slug` column itself does not exist in this environment,
+      // fall back to a simple company row without slug-based logic.
+      if (err.code === 'ER_BAD_FIELD_ERROR' && err.message.includes('slug')) {
+        const [newCompanyResult] = await pool.execute(
+          'INSERT INTO companies (name) VALUES (?)',
+          [companyName]
+        );
+        companyId = newCompanyResult.insertId;
+        // We cannot persist slug in DB, so URLs will not use subdomains here.
+        companySlugForUrl = null;
+      } else {
+        throw err;
       }
     }
 
@@ -2084,7 +2699,7 @@ app.post('/api/auth/register', async (req, res) => {
       company: {
         id: companyId,
         name: companyName,
-        slug: slug,
+        slug: companySlugForUrl,
         url: (() => {
           const protocol = req.protocol;
           const origin = req.get('origin');
@@ -2099,16 +2714,31 @@ app.post('/api/auth/register', async (req, res) => {
           }
 
           baseDomain = baseDomain.replace(/^www\./, '');
-          return `${protocol}://${slug}.${baseDomain}`;
+
+          // If we have a slug stored, use subdomain; otherwise, just use base domain.
+          if (companySlugForUrl) {
+            return `${protocol}://${companySlugForUrl}.${baseDomain}`;
+          }
+          return `${protocol}://${baseDomain}`;
         })()
       }
     });
   } catch (error) {
-    console.error('Error registering user:', error);
+    // Log detailed error information for debugging (visible in Render logs)
+    console.error('Error registering user:', {
+      message: error.message,
+      code: error.code,
+      errno: error.errno,
+      sqlState: error.sqlState,
+      sqlMessage: error.sqlMessage
+    });
+
     res.status(500).json({
       success: false,
       message: 'Failed to register user',
-      error: error.message
+      // Expose minimal details to help diagnose pre-prod issues without breaking frontend
+      error: error.message,
+      code: error.code
     });
   }
 });
@@ -2117,23 +2747,49 @@ app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    // Find user by email
+    console.log('[LOGIN] Attempt for email:', email);
+
+    // Find user by email (including role_id for permissions)
     const [users] = await pool.execute(
-      'SELECT id, full_name, email, password_hash, role, company_id FROM users WHERE email = ?',
+      'SELECT id, full_name, email, password_hash, role, role_id, company_id FROM users WHERE email = ?',
       [email]
     );
 
     if (users.length === 0) {
+      console.log('[LOGIN] User not found for email:', email);
       return res.status(401).json({ success: false, message: 'Invalid email or password' });
     }
 
     const user = users[0];
+    console.log('[LOGIN] User found:', { id: user.id, email: user.email, role: user.role, company_id: user.company_id, has_role_id: !!user.role_id });
 
     // Compare password
     const passwordMatch = await bcrypt.compare(password, user.password_hash);
 
     if (!passwordMatch) {
+      console.log('[LOGIN] Password mismatch for email:', email);
       return res.status(401).json({ success: false, message: 'Invalid email or password' });
+    }
+
+    console.log('[LOGIN] Password matched for email:', email);
+
+    // Fetch role permissions if user has a role_id
+    let permissions = null;
+    if (user.role_id) {
+      const [roles] = await pool.execute(
+        'SELECT permissions FROM roles WHERE id = ?',
+        [user.role_id]
+      );
+      if (roles.length > 0 && roles[0].permissions) {
+        try {
+          permissions = typeof roles[0].permissions === 'string'
+            ? JSON.parse(roles[0].permissions)
+            : roles[0].permissions;
+          console.log('[LOGIN] Permissions loaded for role_id:', user.role_id, permissions);
+        } catch (e) {
+          console.error('Error parsing permissions:', e);
+        }
+      }
     }
 
     // Remove password hash from response
@@ -2186,7 +2842,7 @@ app.post('/api/auth/login', async (req, res) => {
     res.json({
       success: true,
       message: 'Login successful',
-      data: { ...userWithoutPassword, token },
+      data: { ...userWithoutPassword, token, permissions },
       company: company
     });
   } catch (error) {
@@ -2199,14 +2855,60 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
-// Email transporter configuration
-const transporter = nodemailer.createTransport({
-  service: 'gmail', // Or use 'smtp.ethereal.email' for testing
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS
+// GET /api/auth/me - Get current user (Missing endpoint fixed)
+app.get('/api/auth/me', authenticateToken, async (req, res) => {
+  try {
+    // Return user info attached to request by authenticateToken
+    // If we need fresh data from DB (including role_id for permissions)
+    const [users] = await pool.execute(
+      'SELECT id, full_name, email, role, role_id, company_id FROM users WHERE id = ?',
+      [req.user.id]
+    );
+
+    if (users.length === 0) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    const user = users[0];
+
+    // Fetch role permissions if user has a role_id
+    let permissions = null;
+    if (user.role_id) {
+      const [roles] = await pool.execute(
+        'SELECT permissions FROM roles WHERE id = ?',
+        [user.role_id]
+      );
+      if (roles.length > 0 && roles[0].permissions) {
+        try {
+          permissions = typeof roles[0].permissions === 'string'
+            ? JSON.parse(roles[0].permissions)
+            : roles[0].permissions;
+        } catch (e) {
+          console.error('Error parsing permissions:', e);
+        }
+      }
+    }
+
+    // Also fetch company info if applicable
+    let company = null;
+    if (user.company_id) {
+      const [companies] = await pool.execute('SELECT id, name, slug FROM companies WHERE id = ?', [user.company_id]);
+      if (companies.length > 0) company = companies[0];
+    }
+
+    res.json({
+      success: true,
+      user: { ...user, permissions },
+      company: company
+    });
+  } catch (error) {
+    console.error('Error in /api/auth/me:', error);
+    res.status(500).json({ success: false, message: 'Server Error' });
   }
 });
+
+// Email transporter configuration moved to top
+
 
 app.post('/api/auth/forgot-password', async (req, res) => {
   try {
@@ -2360,6 +3062,47 @@ app.get('/api/analytics/revenue-by-payment', authenticateToken, async (req, res)
       message: 'Failed to fetch revenue by payment method',
       error: error.message
     });
+  }
+});
+
+// Submit Feedback
+app.post('/api/feedback', async (req, res) => {
+  try {
+    const { order_id, customer_id, rating, comments } = req.body;
+
+    // Validate if order exists
+    const [orders] = await pool.execute('SELECT id, company_id FROM orders WHERE id = ?', [order_id]);
+    if (orders.length === 0) return res.status(404).json({ success: false, message: 'Order not found' });
+
+    const company_id = orders[0].company_id;
+
+    // Save feedback (Assuming a 'feedback' table exists, if not create it or store in orders table)
+    // For simplicity, let's update the orders table if columns exist, or create a separate table.
+    // Let's create a feedback table if not exists in schema update, but for now safely check.
+
+    // Use schema update check in startup, or lazy create here for robustness
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS feedback (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        order_id INT,
+        customer_id INT,
+        company_id INT,
+        rating INT,
+        comments TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (order_id) REFERENCES orders(id)
+      )
+    `);
+
+    await pool.execute(
+      'INSERT INTO feedback (order_id, customer_id, company_id, rating, comments) VALUES (?, ?, ?, ?, ?)',
+      [order_id, customer_id || null, company_id, rating, comments]
+    );
+
+    res.json({ success: true, message: 'Feedback submitted successfully' });
+  } catch (error) {
+    console.error('Error submitting feedback:', error);
+    res.status(500).json({ success: false, message: 'Failed to submit feedback' });
   }
 });
 
@@ -2581,14 +3324,25 @@ const initializeDatabase = async () => {
 app.get('/api/ingredients', authenticateToken, async (req, res) => {
   try {
     const { company_id } = req.user;
-    const [rows] = await pool.execute(`
+    const { branch_id } = req.query;
+
+    let query = `
     SELECT *,
       current_stock as quantity,
       min_stock_level as threshold 
       FROM ingredients 
-      WHERE company_id = ?
-      ORDER BY name
-      `, [company_id]);
+      WHERE company_id = ?`;
+
+    const params = [company_id];
+
+    if (branch_id && branch_id !== 'null' && branch_id !== 'undefined') {
+      query += ' AND (branch_id = ? OR branch_id IS NULL)';
+      params.push(branch_id);
+    }
+
+    query += ' ORDER BY name';
+
+    const [rows] = await pool.execute(query, params);
     res.json({ success: true, data: rows });
   } catch (error) {
     console.error('Error fetching ingredients:', error);
@@ -2598,9 +3352,9 @@ app.get('/api/ingredients', authenticateToken, async (req, res) => {
 
 app.post('/api/ingredients', authenticateToken, async (req, res) => {
   try {
-    const { name, quantity, unit, threshold, current_stock, min_stock_level, cost_per_unit } = req.body;
+    const { name, quantity, unit, threshold, current_stock, min_stock_level, cost_per_unit, branch_id } = req.body;
     const { company_id } = req.user;
-    console.log(`Creating ingredient for company_id: ${company_id}`);
+    console.log(`Creating ingredient for company_id: ${company_id} branch_id: ${branch_id}`);
 
     if (!company_id) {
       return res.status(400).json({ success: false, message: 'Company context missing. Please relogin.' });
@@ -2616,8 +3370,8 @@ app.post('/api/ingredients', authenticateToken, async (req, res) => {
     const cost = cost_per_unit !== undefined ? cost_per_unit : 0.00;
 
     const [result] = await pool.execute(
-      'INSERT INTO ingredients (name, current_stock, unit, min_stock_level, cost_per_unit, company_id) VALUES (?, ?, ?, ?, ?, ?)',
-      [name, stock, unit, minStock, cost, company_id]
+      'INSERT INTO ingredients (name, current_stock, unit, min_stock_level, cost_per_unit, company_id, branch_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [name, stock, unit, minStock, cost, company_id, branch_id || null]
     );
 
     const [newIngredient] = await pool.execute(`
@@ -2636,7 +3390,7 @@ app.post('/api/ingredients', authenticateToken, async (req, res) => {
 
 app.put('/api/ingredients/:id', authenticateToken, async (req, res) => {
   try {
-    const { name, quantity, unit, threshold, current_stock, min_stock_level, cost_per_unit } = req.body;
+    const { name, quantity, unit, threshold, current_stock, min_stock_level, cost_per_unit, branch_id } = req.body;
     const { company_id } = req.user;
 
     // Validation
@@ -2648,8 +3402,8 @@ app.put('/api/ingredients/:id', authenticateToken, async (req, res) => {
     const cost = cost_per_unit !== undefined ? cost_per_unit : 0.00;
 
     const [result] = await pool.execute(
-      'UPDATE ingredients SET name = ?, current_stock = ?, unit = ?, min_stock_level = ?, cost_per_unit = ? WHERE id = ? AND company_id = ?',
-      [name, stock, unit, minStock, cost, req.params.id, company_id]
+      'UPDATE ingredients SET name = ?, current_stock = ?, unit = ?, min_stock_level = ?, cost_per_unit = ?, branch_id = ? WHERE id = ? AND company_id = ?',
+      [name, stock, unit, minStock, cost, branch_id || null, req.params.id, company_id]
     );
 
     if (result.affectedRows === 0) {
@@ -2721,21 +3475,56 @@ app.post('/api/feedback', async (req, res) => {
 app.post('/api/orders/:id/cancel', authenticateToken, async (req, res) => {
   try {
     const { reason, cancelled_by } = req.body;
-    const { company_id } = req.user;
 
-    // Verify ownership
+    console.log('[CANCEL ORDER] Order:', req.params.id, 'User:', req.user?.id);
+
+    // Resolve company_id (same as order status update)
+    let company_id = null;
+    if (req.company && req.company.id) {
+      company_id = req.company.id;
+    }
+    if (!company_id && req.headers['x-company-id']) {
+      company_id = parseInt(req.headers['x-company-id']);
+    }
+    if (!company_id && req.user && req.user.company_id) {
+      company_id = req.user.company_id;
+    }
+
+    // Get from order if needed
+    if (!company_id) {
+      const [orderRows] = await pool.execute('SELECT company_id FROM orders WHERE id = ?', [req.params.id]);
+      if (orderRows.length > 0) {
+        company_id = orderRows[0].company_id;
+      }
+    }
+
+    console.log('[CANCEL ORDER] Resolved company_id:', company_id);
+
+    // Verify ownership (check if order exists for this company)
     const [existing] = await pool.execute('SELECT id FROM orders WHERE id = ? AND company_id = ?', [req.params.id, company_id]);
     if (existing.length === 0) {
+      console.log('[CANCEL ORDER] Order not found or access denied');
       return res.status(404).json({ success: false, message: 'Order not found or access denied' });
     }
 
-    // Update order status
-    await pool.execute('UPDATE orders SET order_status = "cancelled" WHERE id = ?', [req.params.id]);
-    // Log cancellation
-    await pool.execute(
-      'INSERT INTO order_cancellations (order_id, reason, cancelled_by) VALUES (?, ?, ?)',
-      [req.params.id, reason, cancelled_by]
-    );
+    // Update order status (using parameterized query)
+    await pool.execute('UPDATE orders SET order_status = ? WHERE id = ?', ['cancelled', req.params.id]);
+    // Log cancellation (skip if table doesn't exist)
+    try {
+      await pool.execute(
+        'INSERT INTO order_cancellations (order_id, reason, cancelled_by) VALUES (?, ?, ?)',
+        [req.params.id, reason, cancelled_by]
+      );
+    } catch (logError) {
+      console.log('[CANCEL ORDER] Could not log to order_cancellations table:', logError.message);
+    }
+    // Emit socket event for Kitchen Display System
+    io.emit('order-status-updated', {
+      id: req.params.id,
+      order_status: 'cancelled',
+      updated_at: new Date()
+    });
+
     res.json({ success: true, message: 'Order cancelled successfully' });
   } catch (error) {
     console.error('Error cancelling order:', error);
@@ -2744,31 +3533,851 @@ app.post('/api/orders/:id/cancel', authenticateToken, async (req, res) => {
 });
 
 app.post('/api/orders/:id/items/:itemId/cancel', authenticateToken, async (req, res) => {
+  const connection = await pool.getConnection();
   try {
+    await connection.beginTransaction();
+    const orderId = req.params.id;
     const { reason, cancelled_by } = req.body;
-    const { company_id } = req.user;
+
+    console.log('[CANCEL ITEM] Order:', orderId, 'Item:', req.params.itemId, 'User:', req.user?.id);
+
+    // Resolve company_id
+    let company_id = null;
+    if (req.company && req.company.id) {
+      company_id = req.company.id;
+    }
+    if (!company_id && req.headers['x-company-id']) {
+      company_id = parseInt(req.headers['x-company-id']);
+    }
+    if (!company_id && req.user && req.user.company_id) {
+      company_id = req.user.company_id;
+    }
+
+    // Get from order if needed
+    if (!company_id) {
+      const [orderRows] = await connection.execute('SELECT company_id FROM orders WHERE id = ?', [orderId]);
+      if (orderRows.length > 0) {
+        company_id = orderRows[0].company_id;
+      }
+    }
+
+    console.log('[CANCEL ITEM] Resolved company_id:', company_id);
 
     // Verify ownership
-    const [existing] = await pool.execute('SELECT id FROM orders WHERE id = ? AND company_id = ?', [req.params.id, company_id]);
+    const [existing] = await connection.execute('SELECT id FROM orders WHERE id = ? AND company_id = ?', [orderId, company_id]);
     if (existing.length === 0) {
+      await connection.rollback();
+      console.log('[CANCEL ITEM] Order not found or access denied');
       return res.status(404).json({ success: false, message: 'Order not found or access denied' });
     }
 
-    // Update item status
-    await pool.execute('UPDATE order_items SET item_status = "cancelled" WHERE id = ? AND order_id = ?', [req.params.itemId, req.params.id]);
-    // Log cancellation
-    await pool.execute(
-      'INSERT INTO order_cancellations (order_id, item_id, reason, cancelled_by) VALUES (?, ?, ?, ?)',
-      [req.params.id, req.params.itemId, reason, cancelled_by]
+    // Delete the item (since item_status column doesn't exist)
+    await connection.execute(
+      'DELETE FROM order_items WHERE id = ? AND order_id = ?',
+      [req.params.itemId, orderId]
     );
+
+    // Recalculate order total
+    const [remainingItems] = await connection.execute(
+      'SELECT SUM(price_inr * quantity) as total_inr, SUM(price_usd * quantity) as total_usd FROM order_items WHERE order_id = ?',
+      [orderId]
+    );
+
+    if (remainingItems[0].total_inr === null) {
+      // No items left - cancel entire order
+      await connection.execute('UPDATE orders SET order_status = ? WHERE id = ?', ['cancelled', orderId]);
+    } else {
+      // Update order total
+      await connection.execute(
+        'UPDATE orders SET total_amount_inr = ?, total_amount_usd = ? WHERE id = ?',
+        [remainingItems[0].total_inr || 0, remainingItems[0].total_usd || 0, orderId]
+      );
+    }
+
+    // Log cancellation (skip if table doesn't exist)
+    try {
+      await connection.execute(
+        'INSERT INTO order_cancellations (order_id, item_id, reason, cancelled_by) VALUES (?, ?, ?, ?)',
+        [orderId, req.params.itemId, reason, cancelled_by]
+      );
+    } catch (logError) {
+      console.log('[CANCEL ITEM] Could not log to order_cancellations table:', logError.message);
+    }
+
+    await connection.commit();
+
+    // Emit socket event for Kitchen Display System
+    io.emit('order-status-updated', {
+      id: orderId,
+      // We don't change the main order status here, but the KDS might need to refresh
+      // For now, let's just emit an update signal or the full order object if feasible
+      // Ideally fetch updated order and emit it
+      updated_at: new Date()
+    });
+
+    // Better: Emit a specific 'item-cancelled' event or just generic 'order-updated'
+    // Fetch the updated order to send full details
+    const [updatedOrderRows] = await connection.execute('SELECT * FROM orders WHERE id = ?', [orderId]);
+    if (updatedOrderRows.length > 0) {
+      // Also fetch items to show updated status
+      const [items] = await connection.execute('SELECT * FROM order_items WHERE order_id = ?', [orderId]);
+      updatedOrderRows[0].items = items;
+      io.emit('order-updated', updatedOrderRows[0]);
+    }
+
     res.json({ success: true, message: 'Item cancelled successfully' });
   } catch (error) {
+    await connection.rollback();
     console.error('Error cancelling item:', error);
     res.status(500).json({ success: false, message: 'Failed to cancel item', error: error.message });
+  } finally {
+    connection.release();
   }
 });
 
-// Start the server
+// Support Ticket API
+
+// Create Ticket
+app.post('/api/support/ticket', async (req, res) => {
+  try {
+    const { name, email, subject, message, user_id } = req.body;
+    let company_id = null;
+
+    // Try to get company context
+    if (req.user && req.user.company_id) {
+      company_id = req.user.company_id;
+    } else {
+      // Fallback for public/guest tickets
+      company_id = 1; // Default to main company if unknown
+    }
+
+    // Generate Message ID for Threading
+    const messageId = `<${Date.now()}.${crypto.randomBytes(4).toString('hex')}@endofhunger.com>`;
+
+    // Insert Ticket
+    const [result] = await pool.execute(
+      'INSERT INTO support_tickets (user_id, company_id, name, email, subject, message_id) VALUES (?, ?, ?, ?, ?, ?)',
+      [user_id || null, company_id, name, email, subject, messageId]
+    );
+
+    const ticketId = result.insertId;
+
+    // Insert first message
+    await pool.execute(
+      'INSERT INTO support_messages (ticket_id, sender_role, message) VALUES (?, ?, ?)',
+      [ticketId, 'user', message]
+    );
+
+    // Send Email
+    if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
+      console.log(`[SUPPORT] Attempting to send ticket email to ${email}`);
+
+      const mailOptions = {
+        from: `EndOfHunger Support <${process.env.EMAIL_USER}>`,
+        to: email, // Send explicitly to user
+        subject: `[Ticket #${ticketId}] ${subject}`,
+        html: getSupportTicketTemplate(ticketId, name, subject, message),
+        messageId: messageId,
+        headers: {
+          'References': messageId
+        }
+      };
+
+      // Send asynchronously (don't block response)
+      transporter.sendMail(mailOptions).catch(err => console.error('Failed to send support email:', err));
+    }
+
+    res.json({ success: true, ticketId, message: 'Ticket created successfully' });
+
+  } catch (error) {
+    console.error('Error creating ticket:', error);
+    res.status(500).json({ success: false, message: 'Failed to create ticket' });
+  }
+});
+
+// Reply to Ticket
+app.post('/api/support/ticket/:id/reply', async (req, res) => {
+  try {
+    const ticketId = req.params.id;
+    const { message, sender_role } = req.body; // 'user' or 'admin'
+
+    await pool.execute(
+      'INSERT INTO support_messages (ticket_id, sender_role, message) VALUES (?, ?, ?)',
+      [ticketId, sender_role || 'user', message]
+    );
+
+    // Fetch ticket details for email
+    const [tickets] = await pool.execute('SELECT * FROM support_tickets WHERE id = ?', [ticketId]);
+    if (tickets.length > 0) {
+      const ticket = tickets[0];
+
+      if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
+        console.log(`[SUPPORT] Attempting to send reply email to ${ticket.email}`);
+
+        // Threading Headers
+
+        // Threading Headers
+        const originalMessageId = ticket.message_id;
+        const replyMessageId = `<${Date.now()}.${crypto.randomBytes(4).toString('hex')}@endofhunger.com>`;
+
+        const mailOptions = {
+          from: `EndOfHunger Support <${process.env.EMAIL_USER}>`,
+          to: ticket.email,
+          subject: `Re: [Ticket #${ticketId}] ${ticket.subject}`,
+          html: getSupportReplyTemplate(ticketId, ticket.name, "Context Message", message),
+          messageId: replyMessageId,
+          inReplyTo: originalMessageId,
+          references: originalMessageId
+        };
+
+        transporter.sendMail(mailOptions).catch(err => console.error('Failed to send reply email:', err));
+      }
+    }
+
+    res.json({ success: true, message: 'Reply sent' });
+  } catch (error) {
+    console.error('Error replying to ticket:', error);
+    res.status(500).json({ success: false, message: 'Failed to reply' });
+  }
+});
+
+// Get Tickets (User)
+
+// Company Profile Endpoints
+app.get('/api/company/profile', authenticateToken, async (req, res) => {
+  try {
+    const { company_id } = req.user;
+    const [rows] = await pool.execute('SELECT * FROM companies WHERE id = ?', [company_id]);
+    if (rows.length === 0) return res.status(404).json({ success: false, message: 'Company not found' });
+    res.json({ success: true, data: rows[0] });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Failed to fetch company profile', error: error.message });
+  }
+});
+
+app.put('/api/company/profile', authenticateToken, async (req, res) => {
+  try {
+    const { name, logo_url, banner_url } = req.body;
+    const { company_id } = req.user;
+
+    console.log('[PROFILE UPDATE] Company:', company_id);
+    console.log('[PROFILE UPDATE] Name:', name);
+    console.log('[PROFILE UPDATE] Logo:', logo_url);
+    console.log('[PROFILE UPDATE] Banner:', banner_url);
+
+    const [result] = await pool.execute(
+      'UPDATE companies SET name = ?, logo_url = ?, banner_url = ? WHERE id = ?',
+      [name, logo_url, banner_url, company_id]
+    );
+
+    console.log('[PROFILE UPDATE] Rows affected:', result.affectedRows);
+
+    const [rows] = await pool.execute('SELECT * FROM companies WHERE id = ?', [company_id]);
+
+    console.log('[PROFILE UPDATE] Updated company:', rows[0]);
+
+    res.json({ success: true, data: rows[0] });
+  } catch (error) {
+    console.error('[PROFILE UPDATE] ERROR:', error.message);
+    console.error('[PROFILE UPDATE] Stack:', error.stack);
+    res.status(500).json({ success: false, message: 'Failed to update company profile', error: error.message });
+  }
+});
+
+app.get('/api/company/public', resolveCompany, async (req, res) => {
+  try {
+    if (!req.company) {
+      // Return null data instead of 404 to avoid frontend console errors
+      return res.json({ success: true, data: null });
+    }
+    // Return safe public info
+    res.json({
+      success: true,
+      data: {
+        id: req.company.id,
+        name: req.company.name,
+        slug: req.company.slug,
+        logo_url: req.company.logo_url || '',
+        banner_url: req.company.banner_url || ''
+      }
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+// Staff Endpoints
+app.get('/api/staff', authenticateToken, async (req, res) => {
+  try {
+    const { company_id } = req.user;
+    const [rows] = await pool.execute('SELECT * FROM staff WHERE company_id = ?', [company_id]);
+    res.json({ success: true, data: rows });
+  } catch (error) {
+    console.error('Error fetching staff:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+app.post('/api/staff', authenticateToken, async (req, res) => {
+  try {
+    const { name, role, pin, email, phone } = req.body;
+    const { company_id } = req.user;
+    const [resDb] = await pool.execute(
+      'INSERT INTO staff (name, role, pin, email, phone, company_id) VALUES (?, ?, ?, ?, ?, ?)',
+      [name || null, role || null, pin || null, email || null, phone || null, company_id]
+    );
+    const [newStaff] = await pool.execute('SELECT * FROM staff WHERE id = ?', [resDb.insertId]);
+    res.json({ success: true, data: newStaff[0] });
+  } catch (error) {
+    console.error('Error creating staff:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+app.delete('/api/staff/:id', authenticateToken, async (req, res) => {
+  try {
+    const { company_id } = req.user;
+    // Verify ownership
+    const [exists] = await pool.execute('SELECT id FROM staff WHERE id = ? AND company_id = ?', [req.params.id, company_id]);
+    if (exists.length === 0) return res.status(404).json({ success: false, message: 'Staff not found' });
+    await pool.execute('DELETE FROM staff WHERE id = ?', [req.params.id]);
+    res.json({ success: true, message: 'Staff deleted' });
+  } catch (e) {
+    console.error('Error deleting staff:', e);
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+app.get('/api/staff/leaves', authenticateToken, async (req, res) => {
+  try {
+    const { company_id } = req.user;
+    const [rows] = await pool.execute('SELECT sl.*, s.name as staff_name FROM staff_leaves sl JOIN staff s ON sl.staff_id = s.id WHERE sl.company_id = ?', [company_id]);
+    res.json({ success: true, data: rows });
+  } catch (error) {
+    console.error('Error fetching leaves:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+app.put('/api/staff/leaves/:id/status', authenticateToken, async (req, res) => {
+  try {
+    const { status } = req.body;
+    const { company_id } = req.user;
+    // Verify ownership via join or subquery
+    await pool.execute('UPDATE staff_leaves SET status = ? WHERE id = ? AND company_id = ?', [status, req.params.id, company_id]);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error updating leave status:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Roles Endpoints
+app.get('/api/roles', authenticateToken, async (req, res) => {
+  try {
+    const { company_id } = req.user;
+    const [rows] = await pool.execute('SELECT * FROM roles WHERE company_id = ?', [company_id]);
+    res.json({ success: true, data: rows });
+  } catch (error) {
+    console.error('Error fetching roles:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+
+
+app.post('/api/roles', authenticateToken, async (req, res) => {
+  try {
+    const { name, permissions } = req.body;
+    const { company_id } = req.user;
+    const [resDb] = await pool.execute(
+      'INSERT INTO roles (name, permissions, company_id) VALUES (?, ?, ?)',
+      [name, JSON.stringify(permissions), company_id]
+    );
+    const [newRole] = await pool.execute('SELECT * FROM roles WHERE id = ?', [resDb.insertId]);
+    res.json({ success: true, data: newRole[0] });
+  } catch (error) {
+    console.error('Error creating role:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+app.put('/api/roles/:id', authenticateToken, async (req, res) => {
+  try {
+    const { name, permissions } = req.body;
+    const { company_id } = req.user;
+    await pool.execute(
+      'UPDATE roles SET name = ?, permissions = ? WHERE id = ? AND company_id = ?',
+      [name, JSON.stringify(permissions), req.params.id, company_id]
+    );
+    const [updated] = await pool.execute('SELECT * FROM roles WHERE id = ?', [req.params.id]);
+    res.json({ success: true, data: updated[0] });
+  } catch (error) {
+    console.error('Error updating role:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+app.delete('/api/roles/:id', authenticateToken, async (req, res) => {
+  try {
+    const { company_id } = req.user;
+    const [exists] = await pool.execute('SELECT id FROM roles WHERE id = ? AND company_id = ?', [req.params.id, company_id]);
+    if (exists.length === 0) return res.status(404).json({ success: false });
+    await pool.execute('DELETE FROM roles WHERE id = ?', [req.params.id]);
+    res.json({ success: true });
+  } catch (e) {
+    console.error('Error deleting role:', e);
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+// Users Endpoints
+app.get('/api/users', authenticateToken, async (req, res) => {
+  try {
+    const { company_id } = req.user;
+    const [rows] = await pool.execute('SELECT id, full_name, email, phone, role, role_id FROM users WHERE company_id = ?', [company_id]);
+    res.json({ success: true, data: rows });
+  } catch (error) {
+    console.error('Error fetching users:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+app.post('/api/users', authenticateToken, async (req, res) => {
+  try {
+    const { full_name, email, password, phone, role_id, role } = req.body;
+    const { company_id } = req.user;
+
+    const saltRounds = 10;
+    const passwordHash = await bcrypt.hash(password, saltRounds);
+
+    const [resDb] = await pool.execute(
+      'INSERT INTO users (full_name, email, password_hash, phone, role, role_id, company_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [full_name, email, passwordHash, phone, role || 'staff', role_id || null, company_id]
+    );
+
+    const [newUser] = await pool.execute('SELECT id, full_name, email, phone, role, role_id FROM users WHERE id = ?', [resDb.insertId]);
+    res.json({ success: true, data: newUser[0] });
+  } catch (error) {
+    console.error('Error creating user:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+app.put('/api/users/:id', authenticateToken, async (req, res) => {
+  try {
+    const { full_name, email, phone, role_id, role } = req.body;
+    const { company_id } = req.user;
+
+    // Check if password update is requested? (Assuming not for now, or minimal update)
+    await pool.execute(
+      'UPDATE users SET full_name = ?, email = ?, phone = ?, role = ?, role_id = ? WHERE id = ? AND company_id = ?',
+      [full_name, email, phone, role, role_id, req.params.id, company_id]
+    );
+
+    const [updated] = await pool.execute('SELECT id, full_name, email, phone, role, role_id FROM users WHERE id = ?', [req.params.id]);
+    res.json({ success: true, data: updated[0] });
+  } catch (error) {
+    console.error('Error updating user:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+app.delete('/api/users/:id', authenticateToken, async (req, res) => {
+  try {
+    const { company_id } = req.user;
+    const [exists] = await pool.execute('SELECT id FROM users WHERE id = ? AND company_id = ?', [req.params.id, company_id]);
+    if (exists.length === 0) return res.status(404).json({ success: false });
+    await pool.execute('DELETE FROM users WHERE id = ?', [req.params.id]);
+    res.json({ success: true });
+  } catch (e) {
+    console.error('Error deleting user:', e);
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+// ============================================
+// BRANCH MANAGEMENT ENDPOINTS
+// ============================================
+
+// GET /api/branches - Get all branches for the company
+app.get('/api/branches', authenticateToken, async (req, res) => {
+  try {
+    const { company_id } = req.user;
+
+    const [branches] = await pool.execute(
+      `SELECT id, name, address, phone, manager_name, is_active, created_at, updated_at
+       FROM branches 
+       WHERE company_id = ?
+       ORDER BY created_at DESC`,
+      [company_id]
+    );
+
+    res.json({ success: true, data: branches });
+  } catch (error) {
+    console.error('Error fetching branches:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// POST /api/branches - Create new branch
+app.post('/api/branches', authenticateToken, async (req, res) => {
+  try {
+    const { name, address, phone, manager_name, is_active } = req.body;
+    const { company_id } = req.user;
+
+    if (!name || !name.trim()) {
+      return res.status(400).json({ success: false, message: 'Branch name is required' });
+    }
+
+    const [existing] = await pool.execute(
+      'SELECT id FROM branches WHERE company_id = ? AND name = ?',
+      [company_id, name.trim()]
+    );
+
+    if (existing.length > 0) {
+      return res.status(400).json({ success: false, message: 'A branch with this name already exists' });
+    }
+
+    const [result] = await pool.execute(
+      `INSERT INTO branches (company_id, name, address, phone, manager_name, is_active)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [company_id, name.trim(), address || null, phone || null, manager_name || null, is_active !== false]
+    );
+
+    const [newBranch] = await pool.execute(
+      'SELECT id, name, address, phone, manager_name, is_active, created_at, updated_at FROM branches WHERE id = ?',
+      [result.insertId]
+    );
+
+    console.log('[BRANCH] Created:', newBranch[0].name);
+    res.json({ success: true, data: newBranch[0] });
+  } catch (error) {
+    console.error('Error creating branch:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// PUT /api/branches/:id - Update branch
+app.put('/api/branches/:id', authenticateToken, async (req, res) => {
+  try {
+    const { name, address, phone, manager_name, is_active } = req.body;
+    const { company_id } = req.user;
+
+    if (!name || !name.trim()) {
+      return res.status(400).json({ success: false, message: 'Branch name is required' });
+    }
+
+    const [exists] = await pool.execute(
+      'SELECT id FROM branches WHERE id = ? AND company_id = ?',
+      [req.params.id, company_id]
+    );
+
+    if (exists.length === 0) {
+      return res.status(404).json({ success: false, message: 'Branch not found' });
+    }
+
+    const [duplicate] = await pool.execute(
+      'SELECT id FROM branches WHERE company_id = ? AND name = ? AND id != ?',
+      [company_id, name.trim(), req.params.id]
+    );
+
+    if (duplicate.length > 0) {
+      return res.status(400).json({ success: false, message: 'A branch with this name already exists' });
+    }
+
+    await pool.execute(
+      `UPDATE branches SET name = ?, address = ?, phone = ?, manager_name = ?, is_active = ?, updated_at = CURRENT_TIMESTAMP
+       WHERE id = ? AND company_id = ?`,
+      [name.trim(), address || null, phone || null, manager_name || null, is_active !== false, req.params.id, company_id]
+    );
+
+    const [updated] = await pool.execute(
+      'SELECT id, name, address, phone, manager_name, is_active, created_at, updated_at FROM branches WHERE id = ?',
+      [req.params.id]
+    );
+
+    console.log('[BRANCH] Updated:', updated[0].name);
+    res.json({ success: true, data: updated[0] });
+  } catch (error) {
+    console.error('Error updating branch:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// DELETE /api/branches/:id - Delete branch
+app.delete('/api/branches/:id', authenticateToken, async (req, res) => {
+  try {
+    const { company_id } = req.user;
+
+    const [exists] = await pool.execute(
+      'SELECT id, name FROM branches WHERE id = ? AND company_id = ?',
+      [req.params.id, company_id]
+    );
+
+    if (exists.length === 0) {
+      return res.status(404).json({ success: false, message: 'Branch not found' });
+    }
+
+    const [menuCount] = await pool.execute(
+      'SELECT COUNT(*) as count FROM menu_items WHERE branch_id = ?',
+      [req.params.id]
+    );
+    const [orderCount] = await pool.execute(
+      'SELECT COUNT(*) as count FROM orders WHERE branch_id = ?',
+      [req.params.id]
+    );
+
+    if (menuCount[0].count > 0 || orderCount[0].count > 0) {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot delete branch. It has ${menuCount[0].count} menu items and ${orderCount[0].count} orders.`
+      });
+    }
+
+    await pool.execute('DELETE FROM branches WHERE id = ?', [req.params.id]);
+    console.log('[BRANCH] Deleted:', exists[0].name);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error deleting branch:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// GET /api/branches/:id - Get single branch with stats
+app.get('/api/branches/:id', authenticateToken, async (req, res) => {
+  try {
+    const { company_id } = req.user;
+
+    const [branch] = await pool.execute(
+      `SELECT id, name, address, phone, manager_name, is_active, created_at, updated_at
+       FROM branches WHERE id = ? AND company_id = ?`,
+      [req.params.id, company_id]
+    );
+
+    if (branch.length === 0) {
+      return res.status(404).json({ success: false, message: 'Branch not found' });
+    }
+
+    const [menuCount] = await pool.execute(
+      'SELECT COUNT(*) as count FROM menu_items WHERE branch_id = ?',
+      [req.params.id]
+    );
+    const [orderCount] = await pool.execute(
+      'SELECT COUNT(*) as count FROM orders WHERE branch_id = ?',
+      [req.params.id]
+    );
+    const [ingredientCount] = await pool.execute(
+      'SELECT COUNT(*) as count FROM ingredients WHERE branch_id = ?',
+      [req.params.id]
+    );
+
+    res.json({
+      success: true,
+      data: {
+        ...branch[0],
+        stats: {
+          menu_items: menuCount[0].count,
+          orders: orderCount[0].count,
+          ingredients: ingredientCount[0].count
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching branch:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Get Orders (Customer) - Simplified for reliability
+app.get('/api/customer/orders', authenticateToken, async (req, res) => {
+  try {
+    console.log('[ORDERS] Starting customer orders fetch...');
+    console.log('[ORDERS] User:', req.user?.id, 'Company from user:', req.user?.company_id);
+    console.log('[ORDERS] req.company:', req.company?.id);
+    console.log('[ORDERS] Headers - Host:', req.headers.host, 'Origin:', req.headers.origin);
+
+    // Determine company_id with comprehensive fallback
+    let company_id = null;
+
+    // Priority 1: From resolved middleware
+    if (req.company && req.company.id) {
+      company_id = req.company.id;
+      console.log('[ORDERS] Using company from middleware:', company_id);
+    }
+
+    // Priority 2: From header
+    if (!company_id && req.headers['x-company-id']) {
+      company_id = parseInt(req.headers['x-company-id']);
+      console.log('[ORDERS] Using company from header:', company_id);
+    }
+
+    // Priority 3: From authenticated user
+    if (!company_id && req.user && req.user.company_id) {
+      company_id = req.user.company_id;
+      console.log('[ORDERS] Using company from user:', company_id);
+    }
+
+    // Priority 4: Database fallback
+    if (!company_id) {
+      console.log('[ORDERS] No company found, attempting database fallback...');
+      try {
+        const [companies] = await pool.execute(
+          'SELECT id FROM companies WHERE logo_url IS NOT NULL AND banner_url IS NOT NULL ORDER BY id DESC LIMIT 1'
+        );
+        if (companies.length > 0) {
+          company_id = companies[0].id;
+          console.log('[ORDERS] Fallback company:', company_id);
+        }
+      } catch (dbError) {
+        console.error('[ORDERS] Database fallback failed:', dbError.message);
+      }
+    }
+
+    // Validate we have a company_id
+    if (!company_id || isNaN(company_id) || company_id <= 0) {
+      console.log('[ORDERS] No valid company_id, returning empty array');
+      return res.json({ success: true, data: [] });
+    }
+
+    console.log('[ORDERS] Fetching orders for user:', req.user.id, 'company:', company_id);
+
+    // Simplified query without subquery to avoid potential issues
+    const [orders] = await pool.execute(
+      'SELECT o.* FROM orders o WHERE o.customer_id = ? AND o.company_id = ? ORDER BY o.created_at DESC',
+      [req.user.id, company_id]
+    );
+
+    console.log('[ORDERS] Found', orders.length, 'orders');
+
+    // Fetch items for each order
+    for (const order of orders) {
+      try {
+        const [items] = await pool.execute(
+          'SELECT * FROM order_items WHERE order_id = ?',
+          [order.id]
+        );
+        order.items = items || [];
+
+        // Check for feedback separately (this won't break if feedback table doesn't exist)
+        try {
+          const [feedback] = await pool.execute(
+            'SELECT COUNT(*) as count FROM feedback WHERE order_id = ?',
+            [order.id]
+          );
+          order.has_feedback = feedback[0].count > 0;
+        } catch (feedbackError) {
+          // Feedback table might not exist, that's OK
+          order.has_feedback = false;
+        }
+      } catch (itemError) {
+        console.error('[ORDERS] Error fetching items for order', order.id, ':', itemError.message);
+        order.items = [];
+      }
+    }
+
+    console.log('[ORDERS] Returning', orders.length, 'orders with items');
+    res.json({ success: true, data: orders });
+
+  } catch (error) {
+    console.error('[ORDERS] CRITICAL ERROR:', error.message);
+    console.error('[ORDERS] Stack:', error.stack);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch orders',
+      error: error.message
+    });
+  }
+});
+
+// Image Upload Endpoint - Using Cloudinary (works on Render/Vercel)
+const multer = require('multer');
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 5 * 1024 * 1024 // 5MB limit
+  }
+});
+
+app.post('/api/upload', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: 'No file uploaded' });
+    }
+
+    console.log('[UPLOAD] File received:', req.file.originalname, 'Size:', req.file.size);
+
+    // Convert image to base64 for database storage
+    // This is stored directly in the database, so it persists on Render
+    const base64Image = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
+
+    console.log('[UPLOAD] Converted to base64, length:', base64Image.length);
+
+    // Return base64 string - this will be saved directly in the database
+    res.json({
+      success: true,
+      url: base64Image
+    });
+
+  } catch (error) {
+    console.error('[UPLOAD] Error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+app.get('/api/support/tickets', async (req, res) => {
+  try {
+    const { user_id, email } = req.query;
+    let query = 'SELECT * FROM support_tickets WHERE ';
+    let params = [];
+
+    if (user_id) {
+      query += 'user_id = ?';
+      params.push(user_id);
+    } else if (email) {
+      query += 'email = ?';
+      params.push(email);
+    } else {
+      return res.json({ success: true, data: [] });
+    }
+
+    query += ' ORDER BY created_at DESC';
+    const [rows] = await pool.execute(query, params);
+    res.json({ success: true, data: rows });
+  } catch (error) {
+    console.error('Error fetching tickets:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch tickets' });
+  }
+});
+
+// Get Ticket Details
+app.get('/api/support/ticket/:id', async (req, res) => {
+  try {
+    const ticketId = req.params.id;
+    const [messages] = await pool.execute(
+      'SELECT * FROM support_messages WHERE ticket_id = ? ORDER BY created_at ASC',
+      [ticketId]
+    );
+    res.json({ success: true, messages });
+  } catch (error) {
+    console.error('Error fetching ticket details:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch messages' });
+  }
+});
+
+// Global error handling middleware - MUST be the last middleware
+app.use((err, req, res, next) => {
+  console.error('Express error:', err);
+  if (res.headersSent) {
+    return next(err);
+  }
+  res.status(500).json({
+    success: false,
+    message: 'Internal server error',
+    error: err.message
+  });
+});
+
 const PORT = process.env.PORT || 5000;
 
 // Initialize and start server
@@ -2777,16 +4386,21 @@ const startServer = async () => {
     // Test database connection first
     const dbConnected = await testDatabaseConnection();
 
-    if (!dbConnected) {
+    if (dbConnected) {
+      console.log('Database connected, checking schema...');
+      await updateDatabaseSchema();
+    } else {
       console.log('Warning: Database connection failed, but server will continue running...');
     }
 
     httpServer.listen(PORT, '0.0.0.0', async () => {
       console.log(`Server is running and accessible on the network at port ${PORT} `);
       console.log(`API endpoints available at http://localhost:${PORT}/api`);
+      console.log('Allowed origins:', allowedOrigins);
 
       // Initialize database after server starts
       await initializeDatabase();
+      await updateDatabaseSchema(); // Run schema updates explicitly after init
 
       // Cleanup invalid data (placeholders and empty categories)
       try {

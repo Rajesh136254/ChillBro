@@ -1,9 +1,9 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useLanguage } from '../contexts/LanguageContext';
 
-const UserSignupPage = ({ redirectUrl }) => {
+const UserSignupPage = () => {
     const [fullName, setFullName] = useState('');
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
@@ -13,9 +13,30 @@ const UserSignupPage = ({ redirectUrl }) => {
     const { signup } = useAuth();
     const navigate = useNavigate();
     const [searchParams] = useSearchParams();
-    const tableNumber = searchParams.get('table') || '1';
+    const tableNumber = searchParams.get('table');
+    const companyId = searchParams.get('companyId');
     const { t, language, changeLanguage } = useLanguage();
     const [showLanguageDropdown, setShowLanguageDropdown] = useState(false);
+    const [companyInfo, setCompanyInfo] = useState(null);
+
+    useEffect(() => {
+        const fetchCompanyInfo = async () => {
+            try {
+                const API_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+                    ? 'http://localhost:5000'
+                    : (process.env.REACT_APP_API_URL || 'https://dineflowbackend.onrender.com');
+
+                const res = await fetch(`${API_URL}/api/company/public`);
+                const json = await res.json();
+                if (json.success && json.data) {
+                    setCompanyInfo(json.data);
+                }
+            } catch (err) {
+                console.error("Failed to fetch company info", err);
+            }
+        };
+        fetchCompanyInfo();
+    }, []);
 
     const handleSubmit = async (e) => {
         e.preventDefault();
@@ -36,8 +57,17 @@ const UserSignupPage = ({ redirectUrl }) => {
         const result = await signup(fullName, email, password);
 
         if (result.success) {
-            // Redirect to login page with table number after successful signup
-            navigate(`/login?mode=login&table=${tableNumber}`);
+            // Redirect to Login Page
+            let url = '/login';
+            const params = new URLSearchParams();
+            params.append('mode', 'login');
+            if (tableNumber) params.append('table', tableNumber);
+            if (companyId) params.append('companyId', companyId);
+
+            const queryString = params.toString();
+            if (queryString) url += `?${queryString}`;
+
+            navigate(url);
         } else {
             setError(result.message);
         }
@@ -46,16 +76,29 @@ const UserSignupPage = ({ redirectUrl }) => {
     };
 
     return (
-        <div className="min-h-screen bg-gray-50 flex flex-col justify-center py-12 sm:px-6 lg:px-8 relative">
+        <div className="min-h-screen flex flex-col justify-center py-12 sm:px-6 lg:px-8 relative overflow-hidden">
+            {/* Video Background */}
+            <div className="fixed inset-0 z-0">
+                <div className="absolute inset-0 bg-black/40 z-10"></div>
+                <video
+                    src="/intro-video.mp4"
+                    autoPlay
+                    loop
+                    muted
+                    playsInline
+                    className="w-full h-full object-cover object-center"
+                />
+            </div>
+
             {/* Language Selector */}
             <div className="absolute top-4 right-4 z-10">
                 <div className="relative">
                     <button
                         onClick={() => setShowLanguageDropdown(!showLanguageDropdown)}
-                        className="bg-white px-4 py-2 rounded-lg shadow-sm border border-gray-200 flex items-center gap-2 hover:bg-gray-50 transition"
+                        className="bg-white/80 backdrop-blur px-4 py-2 rounded-lg shadow-sm border border-gray-200 flex items-center gap-2 hover:bg-white transition"
                     >
-                        <i className="fas fa-globe text-gray-500"></i>
-                        <span className="uppercase font-medium text-gray-700">{language}</span>
+                        <i className="fas fa-globe text-gray-700"></i>
+                        <span className="uppercase font-medium text-gray-800">{language}</span>
                     </button>
                     {showLanguageDropdown && (
                         <div className="absolute right-0 mt-2 w-32 bg-white rounded-md shadow-lg z-50 py-1 text-gray-800 border border-gray-100">
@@ -82,24 +125,35 @@ const UserSignupPage = ({ redirectUrl }) => {
                 </div>
             </div>
 
-            <div className="sm:mx-auto sm:w-full sm:max-w-md">
+            <div className="relative z-10 sm:mx-auto sm:w-full sm:max-w-md">
                 <div className="flex justify-center">
-                    <div className="w-16 h-16 bg-blue-600 rounded-full flex items-center justify-center">
-                        <i className="fas fa-utensils text-white text-2xl"></i>
-                    </div>
+                    {companyInfo?.logo_url ? (
+                        <img
+                            src={companyInfo.logo_url}
+                            alt={companyInfo.company_name || "Company Logo"}
+                            className="w-24 h-24 object-contain rounded-full bg-white shadow-md p-2"
+                        />
+                    ) : (
+                        <div className="w-16 h-16 bg-blue-600 rounded-full flex items-center justify-center">
+                            <i className="fas fa-utensils text-white text-2xl"></i>
+                        </div>
+                    )}
                 </div>
                 <h2 className="mt-6 text-center text-3xl font-extrabold text-gray-900">
                     {t('createAccountTitle')}
                 </h2>
                 <p className="mt-2 text-center text-sm text-gray-600">
                     {t('or')}{' '}
-                    <Link to={`/login?mode=login&table=${tableNumber}`} className="font-medium text-blue-600 hover:text-blue-500">
+                    <Link
+                        to={`/signup?mode=login${tableNumber ? `&table=${tableNumber}` : ''}${companyId ? `&companyId=${companyId}` : ''}`}
+                        className="font-medium text-blue-600 hover:text-blue-500"
+                    >
                         {t('signInLink')}
                     </Link>
                 </p>
             </div>
 
-            <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md">
+            <div className="relative z-10 mt-8 sm:mx-auto sm:w-full sm:max-w-md">
                 <div className="bg-white py-8 px-4 shadow sm:rounded-lg sm:px-10">
                     {error && (
                         <div className="mb-4 bg-red-50 border-l-4 border-red-500 p-4">

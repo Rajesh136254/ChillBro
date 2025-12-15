@@ -1,5 +1,5 @@
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useLanguage } from '../contexts/LanguageContext';
@@ -13,10 +13,45 @@ const LoginPage = ({ redirectUrl }) => {
     const { login } = useAuth();
     const navigate = useNavigate();
     const [searchParams] = useSearchParams();
-    const tableNumber = searchParams.get('table') || '1';
+    const tableNumber = searchParams.get('table');
     const { t, language, changeLanguage } = useLanguage();
     const [showLanguageDropdown, setShowLanguageDropdown] = useState(false);
     const [showForgotPassword, setShowForgotPassword] = useState(false);
+    const [companyInfo, setCompanyInfo] = useState(null);
+    const { logout } = useAuth(); // Get logout function
+
+    // Clear session if mode=login is present (forced logout)
+    useEffect(() => {
+        const mode = searchParams.get('mode');
+        if (mode === 'login') {
+            // We can't call logout() directly here because it redirects to /login?mode=login 
+            // which would cause an infinite loop if not handled carefully.
+            // Instead, we manually clear storage to be safe, or rely on the fact that 
+            // the logout function ALREADY redirected us here.
+            // But to be double sure, let's clear localStorage.
+            localStorage.removeItem('token');
+            localStorage.removeItem('user');
+        }
+    }, [searchParams]);
+
+    useEffect(() => {
+        const fetchCompanyInfo = async () => {
+            try {
+                const API_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+                    ? 'http://localhost:5000'
+                    : (process.env.REACT_APP_API_URL || 'https://dineflowbackend.onrender.com');
+
+                const res = await fetch(`${API_URL}/api/company/public`);
+                const json = await res.json();
+                if (json.success && json.data) {
+                    setCompanyInfo(json.data);
+                }
+            } catch (err) {
+                console.error("Failed to fetch company info", err);
+            }
+        };
+        fetchCompanyInfo();
+    }, []);
 
     // Use environment variable for API URL with fallback
     const API_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
@@ -24,7 +59,7 @@ const LoginPage = ({ redirectUrl }) => {
         : (process.env.REACT_APP_API_URL || 'https://dineflowbackend.onrender.com');
 
     // Use redirectUrl if provided, otherwise use default
-    const redirectTo = redirectUrl || `/customer.html?table=${tableNumber}`;
+    const redirectTo = redirectUrl || (tableNumber ? `/customer.html?table=${tableNumber}` : '/customer.html');
 
     const handleSubmit = async (e) => {
         e.preventDefault();
@@ -37,7 +72,17 @@ const LoginPage = ({ redirectUrl }) => {
             // For QR flow (LoginPage), everyone goes to CustomerPage
             // We removed the admin redirect logic from here as requested
             if (result.user && (['user', 'customer'].includes(result.user.role))) {
-                navigate(`/customer.html?table=${tableNumber}`);
+                const companyId = searchParams.get('companyId');
+                let targetUrl = '/customer.html';
+                const params = new URLSearchParams();
+
+                if (tableNumber) params.append('table', tableNumber);
+                if (companyId) params.append('companyId', companyId);
+
+                const queryString = params.toString();
+                if (queryString) targetUrl += `?${queryString}`;
+
+                navigate(targetUrl);
             } else {
                 navigate(redirectTo);
             }
@@ -49,7 +94,19 @@ const LoginPage = ({ redirectUrl }) => {
     };
 
     return (
-        <div className="min-h-screen bg-gray-50 flex flex-col justify-center py-12 sm:px-6 lg:px-8 relative">
+        <div className="min-h-screen flex flex-col justify-center py-12 sm:px-6 lg:px-8 relative overflow-hidden">
+            {/* Video Background */}
+            <div className="fixed inset-0 z-0">
+                <div className="absolute inset-0 bg-black/40 z-10"></div>
+                <video
+                    src="/intro-video.mp4"
+                    autoPlay
+                    loop
+                    muted
+                    playsInline
+                    className="w-full h-full object-cover object-center"
+                />
+            </div>
             {/* Language Selector */}
             <div className="absolute top-4 right-4 z-10">
                 <div className="relative">
@@ -85,25 +142,33 @@ const LoginPage = ({ redirectUrl }) => {
                 </div>
             </div>
 
-            <div className="sm:mx-auto sm:w-full sm:max-w-md">
+            <div className="relative z-10 sm:mx-auto sm:w-full sm:max-w-md">
                 <div className="flex justify-center">
-                    <div className="w-16 h-16 bg-blue-600 rounded-full flex items-center justify-center">
-                        <i className="fas fa-utensils text-white text-2xl"></i>
-                    </div>
+                    {companyInfo?.logo_url ? (
+                        <img
+                            src={companyInfo.logo_url}
+                            alt={companyInfo.company_name || "Company Logo"}
+                            className="w-24 h-24 object-contain rounded-full bg-white shadow-md p-2"
+                        />
+                    ) : (
+                        <div className="w-16 h-16 bg-blue-600 rounded-full flex items-center justify-center">
+                            <i className="fas fa-utensils text-white text-2xl"></i>
+                        </div>
+                    )}
                 </div>
-                <h2 className="mt-6 text-center text-3xl font-extrabold text-gray-900">
+                <h2 className="mt-6 text-center text-3xl font-extrabold text-white sm:text-gray-900 drop-shadow-md sm:drop-shadow-none">
                     {t('signInTitle')}
                 </h2>
-                <p className="mt-2 text-center text-sm text-gray-600">
+                <p className="mt-2 text-center text-sm text-gray-200 sm:text-gray-600">
                     {t('or')}{' '}
-                    <Link to={`/login?mode=signup&table=${tableNumber}`} className="font-medium text-blue-600 hover:text-blue-500">
+                    <Link to={`/login?mode=signup&table=${tableNumber}`} className="font-medium text-blue-400 sm:text-blue-600 hover:text-blue-300 sm:hover:text-blue-500">
                         {t('createAccountLink')}
                     </Link>
                 </p>
             </div>
 
-            <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md">
-                <div className="bg-white py-8 px-4 shadow sm:rounded-lg sm:px-10">
+            <div className="relative z-10 mt-8 sm:mx-auto sm:w-full sm:max-w-md">
+                <div className="bg-white/90 backdrop-blur-md py-8 px-4 shadow sm:rounded-lg sm:px-10">
                     {error && (
                         <div className="mb-4 bg-red-50 border-l-4 border-red-500 p-4">
                             <div className="flex">

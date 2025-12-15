@@ -1,9 +1,11 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useAuth } from '../contexts/AuthContext';
+import { useBranch } from '../contexts/BranchContext';
 import Chart from 'chart.js/auto';
-import jsPDF from 'jspdf';
+import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
 import * as XLSX from 'xlsx';
+import BranchSelector from '../components/BranchSelector';
 
 function AnalyticsPage() {
     const { token, logout } = useAuth();
@@ -14,6 +16,27 @@ function AnalyticsPage() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
     const [activeTab, setActiveTab] = useState('overview');
+    const [companyInfo, setCompanyInfo] = useState(null);
+    const { selectedBranch, branches } = useBranch();
+
+    useEffect(() => {
+        const fetchCompanyInfo = async () => {
+            try {
+                const API_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+                    ? 'http://localhost:5000'
+                    : (process.env.REACT_APP_API_URL || 'https://dineflowbackend.onrender.com');
+
+                const res = await fetch(`${API_URL}/api/company/public`);
+                const json = await res.json();
+                if (json.success && json.data) {
+                    setCompanyInfo(json.data);
+                }
+            } catch (err) {
+                console.error("Failed to fetch company info", err);
+            }
+        };
+        fetchCompanyInfo();
+    }, []);
 
     // Refs for chart canvases
     const revenueChartRef = useRef(null);
@@ -136,10 +159,11 @@ function AnalyticsPage() {
 
         try {
             const canvas = await html2canvas(element, {
-                scale: 2,
+                scale: 3, // Increased scale for better quality
                 useCORS: true,
                 logging: false,
-                backgroundColor: '#f9fafb' // match bg-gray-50
+                allowTaint: true,
+                backgroundColor: null // Use actual background color
             });
 
             const imgData = canvas.toDataURL('image/png');
@@ -208,15 +232,16 @@ function AnalyticsPage() {
         };
 
         try {
+            const branchQuery = selectedBranch ? `&branch_id=${selectedBranch}` : '';
             const [summaryRes, revenueOrdersRes, topItemsRes, categoryRes, paymentRes, tableRes, hourlyRes, customerRes] = await Promise.all([
-                authFetch(`${API_URL}/api/analytics/summary?period=${timePeriod}&currency=${currentCurrency}`),
-                authFetch(`${API_URL}/api/analytics/revenue-orders?period=${timePeriod}&currency=${currentCurrency}`),
-                authFetch(`${API_URL}/api/analytics/top-items?period=${timePeriod}&currency=${currentCurrency}`),
-                authFetch(`${API_URL}/api/analytics/category-performance?period=${timePeriod}&currency=${currentCurrency}`),
-                authFetch(`${API_URL}/api/analytics/payment-methods?period=${timePeriod}`),
-                authFetch(`${API_URL}/api/analytics/table-performance?period=${timePeriod}&currency=${currentCurrency}`),
-                authFetch(`${API_URL}/api/analytics/hourly-orders?period=${timePeriod}`),
-                authFetch(`${API_URL}/api/analytics/customer-retention?period=${timePeriod}`)
+                authFetch(`${API_URL}/api/analytics/summary?period=${timePeriod}&currency=${currentCurrency}${branchQuery}`),
+                authFetch(`${API_URL}/api/analytics/revenue-orders?period=${timePeriod}&currency=${currentCurrency}${branchQuery}`),
+                authFetch(`${API_URL}/api/analytics/top-items?period=${timePeriod}&currency=${currentCurrency}${branchQuery}`),
+                authFetch(`${API_URL}/api/analytics/category-performance?period=${timePeriod}&currency=${currentCurrency}${branchQuery}`),
+                authFetch(`${API_URL}/api/analytics/payment-methods?period=${timePeriod}${branchQuery}`),
+                authFetch(`${API_URL}/api/analytics/table-performance?period=${timePeriod}&currency=${currentCurrency}${branchQuery}`),
+                authFetch(`${API_URL}/api/analytics/hourly-orders?period=${timePeriod}${branchQuery}`),
+                authFetch(`${API_URL}/api/analytics/customer-retention?period=${timePeriod}${branchQuery}`)
             ]);
 
             if (!summaryRes.ok) throw new Error(`Summary API error: ${summaryRes.status}`);
@@ -259,7 +284,8 @@ function AnalyticsPage() {
 
             // Fetch previous period data
             try {
-                const prevRes = await authFetch(`${API_URL}/api/analytics/previous-period?period=${timePeriod}&currency=${currentCurrency}`);
+                const branchQuery = selectedBranch ? `&branch_id=${selectedBranch}` : '';
+                const prevRes = await authFetch(`${API_URL}/api/analytics/previous-period?period=${timePeriod}&currency=${currentCurrency}${branchQuery}`);
                 if (prevRes.ok) {
                     const prevData = await prevRes.json();
                     if (prevData.success) {
@@ -276,7 +302,7 @@ function AnalyticsPage() {
         } finally {
             setLoading(false);
         }
-    }, [timePeriod, currentCurrency, token, logout, API_URL]);
+    }, [timePeriod, currentCurrency, token, logout, API_URL, selectedBranch]);
 
     // Initial fetch
     useEffect(() => {
@@ -631,12 +657,22 @@ function AnalyticsPage() {
 
     return (
         <div className="min-h-screen bg-gray-50">
-            <div className="gradient-bg text-white p-4 sm:p-6">
+            <div className={`text-white p-4 sm:p-6 transition-all duration-500 ${!companyInfo?.banner_url ? 'gradient-bg' : ''}`}
+                style={companyInfo?.banner_url ? {
+                    backgroundImage: `linear-gradient(rgba(0, 0, 0, 0.6), rgba(0, 0, 0, 0.6)), url(${companyInfo.banner_url})`,
+                    backgroundSize: 'cover',
+                    backgroundPosition: 'center'
+                } : {}}
+            >
                 <div className="container mx-auto">
                     <div className="header-content flex justify-between items-start sm:items-center">
                         <div>
                             <h1 className="text-2xl sm:text-3xl lg:text-4xl font-bold flex items-center">
-                                <i className="fas fa-chart-line mr-2 sm:mr-3"></i>
+                                {companyInfo?.logo_url ? (
+                                    <img src={companyInfo.logo_url} alt="Logo" className="w-8 h-8 sm:w-10 sm:h-10 rounded-full object-cover mr-3 border-2 border-white/30" />
+                                ) : (
+                                    <i className="fas fa-chart-line mr-2 sm:mr-3"></i>
+                                )}
                                 Analytics Dashboard
                             </h1>
                             <p className="text-white/80 mt-2">Real-time insights into your restaurant's performance</p>
@@ -666,7 +702,10 @@ function AnalyticsPage() {
                 </div>
             </div>
 
+
+
             <div className="container mx-auto px-3 sm:px-4 py-4 sm:py-6">
+                <BranchSelector API_URL={API_URL} />
                 {renderTimePeriodButtons()}
 
                 {error && renderErrorState()}

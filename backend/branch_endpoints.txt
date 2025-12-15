@@ -1,0 +1,236 @@
+
+// ============================================
+// BRANCH MANAGEMENT ENDPOINTS
+// ============================================
+
+// GET /api/branches - Get all branches for the company
+app.get('/api/branches', authenticateToken, async (req, res) => {
+  try {
+    const { company_id } = req.user;
+    
+    const [branches] = await pool.execute(
+      `SELECT id, name, address, phone, manager_name, is_active, created_at, updated_at
+       FROM branches 
+       WHERE company_id = ?
+       ORDER BY created_at DESC`,
+      [company_id]
+    );
+    
+    res.json({ success: true, data: branches });
+  } catch (error) {
+    console.error('Error fetching branches:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// POST /api/branches - Create new branch
+app.post('/api/branches', authenticateToken, async (req, res) => {
+  try {
+    const { name, address, phone, manager_name, is_active } = req.body;
+    const { company_id } = req.user;
+
+    // Validate required fields
+    if (!name || !name.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Branch name is required'
+      });
+    }
+
+    // Check if branch with same name already exists for this company
+    const [existing] = await pool.execute(
+      'SELECT id FROM branches WHERE company_id = ? AND name = ?',
+      [company_id, name.trim()]
+    );
+
+    if (existing.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'A branch with this name already exists'
+      });
+    }
+
+    // Create branch
+    const [result] = await pool.execute(
+      `INSERT INTO branches (company_id, name, address, phone, manager_name, is_active)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [company_id, name.trim(), address || null, phone || null, manager_name || null, is_active !== false]
+    );
+
+    // Fetch the created branch
+    const [newBranch] = await pool.execute(
+      'SELECT id, name, address, phone, manager_name, is_active, created_at, updated_at FROM branches WHERE id = ?',
+      [result.insertId]
+    );
+
+    console.log('[BRANCH] Created new branch:', newBranch[0].name, 'for company', company_id);
+    
+    res.json({ success: true, data: newBranch[0] });
+  } catch (error) {
+    console.error('Error creating branch:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// PUT /api/branches/:id - Update branch
+app.put('/api/branches/:id', authenticateToken, async (req, res) => {
+  try {
+    const { name, address, phone, manager_name, is_active } = req.body;
+    const { company_id } = req.user;
+    const branchId = req.params.id;
+
+    // Validate required fields
+    if (!name || !name.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Branch name is required'
+      });
+    }
+
+    // Check if branch exists and belongs to this company
+    const [exists] = await pool.execute(
+      'SELECT id FROM branches WHERE id = ? AND company_id = ?',
+      [branchId, company_id]
+    );
+
+    if (exists.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Branch not found'
+      });
+    }
+
+    // Check if another branch with same name exists (excluding current branch)
+    const [duplicate] = await pool.execute(
+      'SELECT id FROM branches WHERE company_id = ? AND name = ? AND id != ?',
+      [company_id, name.trim(), branchId]
+    );
+
+    if (duplicate.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'A branch with this name already exists'
+      });
+    }
+
+    // Update branch
+    await pool.execute(
+      `UPDATE branches 
+       SET name = ?, address = ?, phone = ?, manager_name = ?, is_active = ?, updated_at = CURRENT_TIMESTAMP
+       WHERE id = ? AND company_id = ?`,
+      [name.trim(), address || null, phone || null, manager_name || null, is_active !== false, branchId, company_id]
+    );
+
+    // Fetch updated branch
+    const [updated] = await pool.execute(
+      'SELECT id, name, address, phone, manager_name, is_active, created_at, updated_at FROM branches WHERE id = ?',
+      [branchId]
+    );
+
+    console.log('[BRANCH] Updated branch:', updated[0].name);
+    
+    res.json({ success: true, data: updated[0] });
+  } catch (error) {
+    console.error('Error updating branch:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// DELETE /api/branches/:id - Delete branch
+app.delete('/api/branches/:id', authenticateToken, async (req, res) => {
+  try {
+    const { company_id } = req.user;
+    const branchId = req.params.id;
+
+    // Check if branch exists and belongs to this company
+    const [exists] = await pool.execute(
+      'SELECT id, name FROM branches WHERE id = ? AND company_id = ?',
+      [branchId, company_id]
+    );
+
+    if (exists.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Branch not found'
+      });
+    }
+
+    // Check if branch has associated data
+    const [menuCount] = await pool.execute(
+      'SELECT COUNT(*) as count FROM menu_items WHERE branch_id = ?',
+      [branchId]
+    );
+    const [orderCount] = await pool.execute(
+      'SELECT COUNT(*) as count FROM orders WHERE branch_id = ?',
+      [branchId]
+    );
+
+    if (menuCount[0].count > 0 || orderCount[0].count > 0) {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot delete branch. It has ${menuCount[0].count} menu items and ${orderCount[0].count} orders. Please reassign them first.`
+      });
+    }
+
+    // Delete branch (will set branch_id to NULL in related tables due to ON DELETE SET NULL)
+    await pool.execute('DELETE FROM branches WHERE id = ?', [branchId]);
+
+    console.log('[BRANCH] Deleted branch:', exists[0].name);
+    
+    res.json({ success: true, message: 'Branch deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting branch:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// GET /api/branches/:id - Get single branch details
+app.get('/api/branches/:id', authenticateToken, async (req, res) => {
+  try {
+    const { company_id } = req.user;
+    const branchId = req.params.id;
+
+    const [branch] = await pool.execute(
+      `SELECT id, name, address, phone, manager_name, is_active, created_at, updated_at
+       FROM branches 
+       WHERE id = ? AND company_id = ?`,
+      [branchId, company_id]
+    );
+
+    if (branch.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Branch not found'
+      });
+    }
+
+    // Get stats for this branch
+    const [menuCount] = await pool.execute(
+      'SELECT COUNT(*) as count FROM menu_items WHERE branch_id = ?',
+      [branchId]
+    );
+    const [orderCount] = await pool.execute(
+      'SELECT COUNT(*) as count FROM orders WHERE branch_id = ?',
+      [branchId]
+    );
+    const [ingredientCount] = await pool.execute(
+      'SELECT COUNT(*) as count FROM ingredients WHERE branch_id = ?',
+      [branchId]
+    );
+
+    const branchData = {
+      ...branch[0],
+      stats: {
+        menu_items: menuCount[0].count,
+        orders: orderCount[0].count,
+        ingredients: ingredientCount[0].count
+      }
+    };
+
+    res.json({ success: true, data: branchData });
+  } catch (error) {
+    console.error('Error fetching branch:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+

@@ -20,37 +20,73 @@ export const AuthProvider = ({ children }) => {
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    // 1. Load any existing auth state from localStorage
-    let storedToken = localStorage.getItem('token');
-    const storedUser = localStorage.getItem('user');
+    const initAuth = async () => {
+      // 1. Load any existing auth state from localStorage
+      let storedToken = localStorage.getItem('token');
+      const storedUser = localStorage.getItem('user');
 
-    // 2. If there is no token yet, but a `token` is present in the URL
-    //    (e.g. after redirect from main domain to company subdomain),
-    //    persist it so admin/analytics can work on the tenant domain.
-    if (!storedToken) {
-      const searchParams = new URLSearchParams(window.location.search);
-      const urlToken = searchParams.get('token');
+      // 2. If there is no token yet, but a `token` is present in the URL
+      //    (e.g. after redirect from main domain to company subdomain),
+      //    persist it so admin/analytics can work on the tenant domain.
+      if (!storedToken) {
+        const searchParams = new URLSearchParams(window.location.search);
+        const urlToken = searchParams.get('token');
 
-      if (urlToken) {
-        storedToken = urlToken;
-        localStorage.setItem('token', urlToken);
+        if (urlToken) {
+          storedToken = urlToken;
+          localStorage.setItem('token', urlToken);
 
-        // Clean token from the URL for security / neatness
-        searchParams.delete('token');
-        const newQuery = searchParams.toString();
-        const newUrl = `${window.location.pathname}${newQuery ? `?${newQuery}` : ''}${window.location.hash}`;
-        window.history.replaceState({}, '', newUrl);
+          // Clean token from the URL for security / neatness
+          searchParams.delete('token');
+          const newQuery = searchParams.toString();
+          const newUrl = `${window.location.pathname}${newQuery ? `?${newQuery}` : ''}${window.location.hash}`;
+          window.history.replaceState({}, '', newUrl);
+        }
       }
-    }
 
-    if (storedToken) {
-      setToken(storedToken);
-    }
-    if (storedToken && storedUser) {
-      setCurrentUser(JSON.parse(storedUser));
-    }
+      if (storedToken) {
+        setToken(storedToken);
 
-    setIsLoading(false);
+        // If we have a token but no user data, fetch it from the backend
+        if (!storedUser) {
+          console.log('🔄 Token found but no user data - fetching from backend...');
+          try {
+            const response = await fetch(`${API_URL}/api/auth/me`, {
+              headers: {
+                'Authorization': `Bearer ${storedToken}`
+              }
+            });
+
+            if (response.ok) {
+              const data = await response.json();
+              if (data.success && data.user) {
+                console.log('✅ User data fetched from backend:', data.user);
+                const userData = {
+                  ...data.user,
+                  permissions: data.user.permissions || null
+                };
+                localStorage.setItem('user', JSON.stringify(userData));
+                setCurrentUser(userData);
+              }
+            } else {
+              console.warn('⚠️ Failed to fetch user data - token may be invalid');
+              // Token is invalid, clear it
+              localStorage.removeItem('token');
+              setToken(null);
+              window.location.href = '/signup?mode=login';
+            }
+          } catch (error) {
+            console.error('❌ Error fetching user data:', error);
+          }
+        } else {
+          setCurrentUser(JSON.parse(storedUser));
+        }
+      }
+
+      setIsLoading(false);
+    };
+
+    initAuth();
   }, []);
 
   const login = async (email, password) => {
@@ -67,11 +103,15 @@ export const AuthProvider = ({ children }) => {
 
       if (data.success) {
         const authToken = data.data.token;
+        const userData = {
+          ...data.data,
+          permissions: data.data.permissions || null
+        };
         localStorage.setItem('token', authToken);
-        localStorage.setItem('user', JSON.stringify(data.data));
+        localStorage.setItem('user', JSON.stringify(userData));
         setToken(authToken);
-        setCurrentUser(data.data);
-        return { success: true, user: data.data, company: data.company };
+        setCurrentUser(userData);
+        return { success: true, user: userData, company: data.company };
       } else {
         return { success: false, message: data.message };
       }
@@ -104,12 +144,35 @@ export const AuthProvider = ({ children }) => {
   };
 
   const logout = () => {
+    // Capture user role BEFORE clearing storage
+    let role = null;
+    if (currentUser && currentUser.role) {
+      role = currentUser.role;
+    } else {
+      try {
+        const stored = JSON.parse(localStorage.getItem('user'));
+        if (stored) role = stored.role;
+      } catch (e) { }
+    }
+
     localStorage.removeItem('token');
     localStorage.removeItem('user');
     setToken(null);
     setCurrentUser(null);
-    // Force a page reload to ensure clean state
-    window.location.href = '/login?mode=login';
+
+    // Force a page reload to ensure clean state with correct redirect
+    if (role === 'admin' || role === 'staff') {
+      window.location.href = '/signup?mode=login';
+    } else {
+      window.location.href = '/login?mode=login';
+    }
+  };
+
+  const updateAuthState = (userData) => {
+    localStorage.setItem('user', JSON.stringify(userData));
+    localStorage.setItem('token', userData.token);
+    setToken(userData.token);
+    setCurrentUser(userData);
   };
 
   const value = {
@@ -118,7 +181,8 @@ export const AuthProvider = ({ children }) => {
     isLoading,
     login,
     signup,
-    logout
+    logout,
+    updateAuthState
   };
 
   return (

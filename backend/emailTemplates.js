@@ -158,11 +158,77 @@ If you did not make this change, please contact our support team immediately.
 © ${new Date().getFullYear()} EndOfHunger.All rights reserved.
 `;
 
+const getSupportTicketTemplate = (ticketId, name, subject, message) => `
+<!DOCTYPE html>
+<html>
+<head>
+  <style>${getBaseStyles()}</style>
+</head>
+<body>
+  <div class="container">
+    <div class="header" style="background: linear-gradient(135deg, #6366f1 0%, #a855f7 100%);">
+      <h1>Support Ticket #${ticketId} 🎫</h1>
+    </div>
+    <div class="content">
+      <div class="greeting">Hello ${name},</div>
+      <p class="message">
+        We have received your support request. Our team is looking into it and will get back to you shortly.
+      </p>
+      <div style="background: #f8fafc; padding: 15px; border-radius: 8px; border-left: 4px solid #6366f1; margin: 20px 0;">
+        <p style="margin: 0 0 5px; font-weight: bold; color: #475569;">Subject: ${subject}</p>
+        <p style="margin: 0; color: #64748b;">${message}</p>
+      </div>
+       <p class="message" style="font-size: 14px; color: #999;">
+        You can reply directly to this email to add more details.
+      </p>
+    </div>
+    <div class="footer">
+      <p>&copy; ${new Date().getFullYear()} EndOfHunger Support.</p>
+    </div>
+  </div>
+</body>
+</html>
+`;
+
+const getSupportReplyTemplate = (ticketId, name, message, replyMessage) => `
+<!DOCTYPE html>
+<html>
+<head>
+  <style>${getBaseStyles()}</style>
+</head>
+<body>
+  <div class="container">
+    <div class="header" style="background: linear-gradient(135deg, #6366f1 0%, #a855f7 100%);">
+      <h1>Reply to Ticket #${ticketId} 💬</h1>
+    </div>
+    <div class="content">
+      <div class="greeting">Hi ${name},</div>
+      <p class="message">
+        New reply to your ticket:
+      </p>
+       <div style="background: #f0fdf4; padding: 15px; border-radius: 8px; border-left: 4px solid #22c55e; margin: 20px 0;">
+        <p style="margin: 0; color: #1e293b;">${replyMessage}</p>
+      </div>
+      <div style="margin-top: 30px; border-top: 1px solid #e2e8f0; padding-top: 10px;">
+        <p style="font-size: 12px; color: #94a3b8; margin-bottom: 5px;">Previous Message:</p>
+         <p style="font-size: 13px; color: #64748b; font-style: italic;">"${message}"</p>
+      </div>
+    </div>
+    <div class="footer">
+      <p>&copy; ${new Date().getFullYear()} EndOfHunger Support.</p>
+    </div>
+  </div>
+</body>
+</html>
+`;
+
 module.exports = {
-    getWelcomeEmailTemplate,
-    getForgotPasswordTemplate,
-    getPasswordResetSuccessTemplate,
-    getWelcomeEmailText,
-    getForgotPasswordText,
-    getPasswordResetSuccessText
+  getWelcomeEmailTemplate,
+  getForgotPasswordTemplate,
+  getPasswordResetSuccessTemplate,
+  getWelcomeEmailText,
+  getForgotPasswordText,
+  getPasswordResetSuccessText,
+  getSupportTicketTemplate,
+  getSupportReplyTemplate
 };

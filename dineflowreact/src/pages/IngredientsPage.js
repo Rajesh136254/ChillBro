@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import { useAuth } from '../contexts/AuthContext';
+import { useBranch } from '../contexts/BranchContext';
+import BranchSelector from '../components/BranchSelector';
 
 const API_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
     ? 'http://localhost:5000'
@@ -16,7 +18,24 @@ function IngredientsPage() {
     const [toast, setToast] = useState({ show: false, message: '', type: 'success' });
     const [confirmModal, setConfirmModal] = useState({ show: false, message: '', onConfirm: null });
     const { token, logout } = useAuth();
+    const { selectedBranch, branches } = useBranch();
     const navigate = useNavigate();
+    const [companyInfo, setCompanyInfo] = useState(null);
+
+    useEffect(() => {
+        const fetchCompanyInfo = async () => {
+            try {
+                const res = await fetch(`${API_URL}/api/company/public`);
+                const json = await res.json();
+                if (json.success && json.data) {
+                    setCompanyInfo(json.data);
+                }
+            } catch (err) {
+                console.error("Failed to fetch company info", err);
+            }
+        };
+        fetchCompanyInfo();
+    }, []);
 
     const showToast = (message, type = 'success') => {
         setToast({ show: true, message, type });
@@ -26,7 +45,11 @@ function IngredientsPage() {
     const loadIngredients = React.useCallback(async () => {
         setIsLoading(true);
         try {
-            const response = await fetch(`${API_URL}/api/ingredients`, {
+            let url = `${API_URL}/api/ingredients`;
+            if (selectedBranch) {
+                url += `?branch_id=${selectedBranch}`;
+            }
+            const response = await fetch(url, {
                 headers: { 'Authorization': `Bearer ${token}` }
             });
             if (response.status === 401 || response.status === 403) {
@@ -43,7 +66,7 @@ function IngredientsPage() {
         } finally {
             setIsLoading(false);
         }
-    }, [token, logout]);
+    }, [token, logout, selectedBranch]);
 
     useEffect(() => {
         if (token) {
@@ -76,7 +99,8 @@ function IngredientsPage() {
         const payload = {
             ...currentIngredient,
             quantity: isNaN(qty) ? 0 : qty,
-            threshold: isNaN(thresh) ? 0 : thresh
+            threshold: isNaN(thresh) ? 0 : thresh,
+            branch_id: selectedBranch // Associate with current branch if selected
         };
 
         try {
@@ -149,10 +173,17 @@ function IngredientsPage() {
     return (
         <div className="min-h-screen bg-gray-50 p-6">
             <div className="max-w-7xl mx-auto">
-                <div className="flex justify-between items-center mb-8">
+                <div className={`flex justify-between items-center mb-8 p-6 rounded-xl shadow-sm transition-all duration-500 ${!companyInfo?.banner_url ? 'bg-white' : 'text-white'}`}
+                    style={companyInfo?.banner_url ? {
+                        backgroundImage: `linear-gradient(rgba(0, 0, 0, 0.6), rgba(0, 0, 0, 0.6)), url(${companyInfo.banner_url})`,
+                        backgroundSize: 'cover',
+                        backgroundPosition: 'center'
+                    } : {}}
+                >
                     <div>
-                        <h1 className="text-3xl font-bold text-gray-900">Ingredients Management</h1>
-                        <p className="text-gray-600">Manage your inventory and stock levels</p>
+                        <h1 className={`text-3xl font-bold ${!companyInfo?.banner_url ? 'text-gray-900' : 'text-white'}`}>Ingredients Management</h1>
+                        <p className={`${!companyInfo?.banner_url ? 'text-gray-600' : 'text-gray-200'}`}>Manage your inventory and stock levels</p>
+
                     </div>
                     <div className="flex gap-4">
                         <button onClick={() => navigate('/admin.html')} className="bg-gray-200 hover:bg-gray-300 text-gray-800 px-4 py-2 rounded-lg transition">
@@ -166,6 +197,8 @@ function IngredientsPage() {
                         </button>
                     </div>
                 </div>
+
+                <BranchSelector API_URL={API_URL} />
 
                 {/* Search and Stats */}
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">

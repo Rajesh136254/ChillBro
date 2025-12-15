@@ -8,7 +8,9 @@ CREATE TABLE IF NOT EXISTS companies (
     slug VARCHAR(255) UNIQUE NOT NULL,
     domain VARCHAR(255),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    logo_url TEXT,
+    banner_url TEXT
 );
 
 -- Create table_groups table if it doesn't exist
@@ -110,7 +112,10 @@ CREATE TABLE IF NOT EXISTS users (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     reset_token VARCHAR(255),
     reset_token_expires DATETIME,
+    reset_token_expires DATETIME,
     company_id INT,
+    phone VARCHAR(20),
+    role_id INT,
     FOREIGN KEY (company_id) REFERENCES companies(id)
 );
 
@@ -119,6 +124,7 @@ CREATE TABLE IF NOT EXISTS staff (
     id INT AUTO_INCREMENT PRIMARY KEY,
     name VARCHAR(100) NOT NULL,
     role VARCHAR(50) NOT NULL,
+    pin VARCHAR(10),
     email VARCHAR(100),
     phone VARCHAR(20),
     hire_date DATE,
@@ -166,5 +172,66 @@ CREATE TABLE IF NOT EXISTS waste_log (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     company_id INT,
     FOREIGN KEY (ingredient_id) REFERENCES ingredients(id),
+    FOREIGN KEY (company_id) REFERENCES companies(id)
+);
+
+-- Create staff_attendance table
+CREATE TABLE IF NOT EXISTS staff_attendance (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    staff_id INT NOT NULL,
+    check_in DATETIME NOT NULL,
+    check_out DATETIME,
+    date DATE NOT NULL,
+    company_id INT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (staff_id) REFERENCES staff(id),
+    FOREIGN KEY (company_id) REFERENCES companies(id)
+);
+
+-- Create staff_leaves table
+CREATE TABLE IF NOT EXISTS staff_leaves (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    staff_id INT NOT NULL,
+    start_date DATE NOT NULL,
+    end_date DATE NOT NULL,
+    reason TEXT,
+    status VARCHAR(20) DEFAULT 'pending',
+    company_id INT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (staff_id) REFERENCES staff(id),
+    FOREIGN KEY (company_id) REFERENCES companies(id)
+);
+
+-- Support Tickets
+CREATE TABLE IF NOT EXISTS support_tickets (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT,
+    company_id INT,
+    name VARCHAR(255),
+    email VARCHAR(255),
+    subject VARCHAR(255),
+    status VARCHAR(50) DEFAULT 'open',
+    message_id VARCHAR(255),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (company_id) REFERENCES companies(id)
+);
+
+-- Support Messages
+CREATE TABLE IF NOT EXISTS support_messages (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    ticket_id INT,
+    sender_role VARCHAR(50),
+    message TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (ticket_id) REFERENCES support_tickets(id)
+);
+
+-- Roles table
+CREATE TABLE IF NOT EXISTS roles (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(50) NOT NULL,
+    permissions JSON,
+    company_id INT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (company_id) REFERENCES companies(id)
 );
